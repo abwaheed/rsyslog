@@ -1,11 +1,20 @@
 #!/bin/bash
-# This file is part of the rsyslog project, released  under GPLv3
-echo ===============================================================================
-echo \[discard-rptdmsg.sh\]: testing discard-rptdmsg functionality
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup discard-rptdmsg.conf
-. $srcdir/diag.sh tcpflood -m10 -i1
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown
-. $srcdir/diag.sh seq-check 2 10
-. $srcdir/diag.sh exit
+# testing discard-rptdmsg functionality when no repeated message is present
+# This file is part of the rsyslog project, released  under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+generate_conf
+add_conf '
+module(load="../plugins/imtcp/.libs/imtcp")
+input(type="imtcp" port="0" listenPortFileName="'$RSYSLOG_DYNNAME'.tcpflood_port")
+template(name="outfmt" type="string" string="%msg:F,58:2%,%msg:F,58:3%,%msg:F,58:4%\n")
+$RepeatedMsgReduction on
+
+:msg, contains, "00000001" ~
+:msg, contains, "msgnum:" action(type="omfile" file="'$RSYSLOG_OUT_LOG'" template="outfmt")
+'
+startup
+tcpflood -m10 -i1
+shutdown_when_empty
+wait_shutdown
+seq_check 2 10
+exit_test

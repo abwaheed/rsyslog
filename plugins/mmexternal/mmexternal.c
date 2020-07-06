@@ -2,18 +2,18 @@
  * This core plugin is an interface module to message modification
  * modules written in languages other than C.
  *
- * Copyright 2014-2017 by Rainer Gerhards
+ * Copyright 2014-2018 by Rainer Gerhards
  *
  * This file is part of rsyslog.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,7 +21,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -33,6 +32,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
+#include "rsyslog.h"
 #include "conf.h"
 #include "syslogd-types.h"
 #include "srUtils.h"
@@ -40,6 +40,7 @@
 #include "msg.h"
 #include "errmsg.h"
 #include "cfsysline.h"
+#include "glbl.h"
 
 
 MODULE_TYPE_OUTPUT
@@ -49,7 +50,6 @@ MODULE_CNFNAME("mmexternal")
 /* internal structures
  */
 DEF_OMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 
 typedef struct _instanceData {
 	uchar *szBinary;	/* name of binary to call */
@@ -98,7 +98,7 @@ static struct cnfparamblk actpblk =
 	};
 
 BEGINinitConfVars		/* (re)set config variables to default values */
-CODESTARTinitConfVars 
+CODESTARTinitConfVars
 	cs.szBinary = NULL;	/* name of binary to call */
 ENDinitConfVars
 
@@ -180,7 +180,7 @@ writeOutputDebug(wrkrInstanceData_t *__restrict__ const pWrkrData,
 				       O_WRONLY | O_APPEND | O_CREAT, 0600);
 		if(pWrkrData->fdOutput == -1) {
 			DBGPRINTF("mmexternal: error opening output file %s: %s\n",
-				   pWrkrData->pData->outputFileName, 
+				   pWrkrData->pData->outputFileName,
 				   rs_strerror_r(errno, errStr, sizeof(errStr)));
 			goto done;
 		}
@@ -249,7 +249,7 @@ processProgramReply(wrkrInstanceData_t *__restrict__ const pWrkrData, smsg_t *co
 	pWrkrData->respBuf[numCharsRead-1] = '\0';
 	iRet = MsgSetPropsViaJSON(pMsg, (uchar*)pWrkrData->respBuf);
 	if(iRet != RS_RET_OK) {
-		errmsg.LogError(0, iRet, "mmexternal: invalid reply '%s' from program '%s'",
+		LogError(0, iRet, "mmexternal: invalid reply '%s' from program '%s'",
 				pWrkrData->respBuf, pWrkrData->pData->szBinary);
 	}
 
@@ -302,7 +302,7 @@ execBinary(wrkrInstanceData_t *pWrkrData, const int fdStdin, const int fdStdOutE
 	sigAct.sa_handler = SIG_IGN;
 	sigaction(SIGINT, &sigAct, NULL);
 	sigemptyset(&set);
-        sigprocmask(SIG_SETMASK, &set, NULL);
+	sigprocmask(SIG_SETMASK, &set, NULL);
 
 	alarm(0);
 
@@ -358,7 +358,7 @@ openPipe(wrkrInstanceData_t *pWrkrData)
 	}
 	pWrkrData->pid = cpid;
 
-	if(cpid == 0) {    
+	if(cpid == 0) {
 		/* we are now the child, just exec the binary. */
 		close(pipestdin[1]); /* close those pipe "ports" that */
 		close(pipestdout[0]); /* we don't need */
@@ -385,26 +385,15 @@ cleanup(wrkrInstanceData_t *pWrkrData)
 {
 	int status;
 	int ret;
-	char errStr[1024];
 	DEFiRet;
 
 	assert(pWrkrData->bIsRunning == 1);
 	ret = waitpid(pWrkrData->pid, &status, 0);
-	if(ret != pWrkrData->pid) {
-		/* if waitpid() fails, we can not do much - try to ignore it... */
-		DBGPRINTF("mmexternal: waitpid() returned state %d[%s], future malfunction may happen\n", ret,
-			   rs_strerror_r(errno, errStr, sizeof(errStr)));
-	} else {
-		/* check if we should print out some diagnostic information */
-		DBGPRINTF("mmexternal: waitpid status return for program '%s': %2.2x\n",
-			  pWrkrData->pData->szBinary, status);
-		if(WIFEXITED(status)) {
-			errmsg.LogError(0, NO_ERRCODE, "program '%s' exited normally, state %d",
-					pWrkrData->pData->szBinary, WEXITSTATUS(status));
-		} else if(WIFSIGNALED(status)) {
-			errmsg.LogError(0, NO_ERRCODE, "program '%s' terminated by signal %d.",
-					pWrkrData->pData->szBinary, WTERMSIG(status));
-		}
+
+	/* waitpid will fail with errno == ECHILD if the child process has already
+	   been reaped by the rsyslogd main loop (see rsyslogd.c) */
+	if(ret == pWrkrData->pid) {
+		glblReportChildProcessExit(pWrkrData->pData->szBinary, pWrkrData->pid, status);
 	}
 
 	if(pWrkrData->fdOutput != -1) {
@@ -449,7 +438,6 @@ callExtProg(wrkrInstanceData_t *__restrict__ const pWrkrData, smsg_t *__restrict
 	int lenWrite;
 	int writeOffset;
 	int i_iov;
-	char errStr[1024];
 	struct iovec iov[2];
 	int bFreeInputstr = 1; /* we must only free if it does not point to msg-obj mem! */
 	const uchar *inputstr = NULL; /* string to be processed by external program */
@@ -483,15 +471,15 @@ callExtProg(wrkrInstanceData_t *__restrict__ const pWrkrData, smsg_t *__restrict
 		if(lenWritten == -1) {
 			switch(errno) {
 			case EPIPE:
-				DBGPRINTF("mmexternal: program '%s' terminated, trying to restart\n",
-					  pWrkrData->pData->szBinary);
+				LogMsg(0, RS_RET_ERR_WRITE_PIPE, LOG_WARNING,
+						"mmexternal: program '%s' (pid %ld) terminated; will be restarted",
+						pWrkrData->pData->szBinary, (long) pWrkrData->pid);
 				CHKiRet(cleanup(pWrkrData));
 				CHKiRet(tryRestart(pWrkrData));
 				writeOffset = 0;
 				break;
 			default:
-				DBGPRINTF("mmexternal: error %d writing to pipe: %s\n", errno,
-					   rs_strerror_r(errno, errStr, sizeof(errStr)));
+				LogError(errno, RS_RET_ERR_WRITE_PIPE, "mmexternal: error sending message to program");
 				ABORT_FINALIZE(RS_RET_ERR_WRITE_PIPE);
 				break;
 			}
@@ -577,7 +565,7 @@ CODESTARTnewActInst
 			else if(!strcmp(cstr, "fulljson"))
 				pData->inputProp = INPUT_JSON;
 			else {
-				errmsg.LogError(0, RS_RET_INVLD_INTERFACE_INPUT,
+				LogError(0, RS_RET_INVLD_INTERFACE_INPUT,
 					"mmexternal: invalid interface.input parameter '%s'",
 					cstr);
 				ABORT_FINALIZE(RS_RET_INVLD_INTERFACE_INPUT);
@@ -602,7 +590,6 @@ BEGINmodExit
 CODESTARTmodExit
 	free(cs.szBinary);
 	cs.szBinary = NULL;
-	iRet = objRelease(errmsg, CORE_COMPONENT);
 ENDmodExit
 
 
@@ -610,7 +597,7 @@ BEGINqueryEtryPt
 CODESTARTqueryEtryPt
 CODEqueryEtryPt_STD_OMOD_QUERIES
 CODEqueryEtryPt_STD_OMOD8_QUERIES
-CODEqueryEtryPt_STD_CONF2_CNFNAME_QUERIES 
+CODEqueryEtryPt_STD_CONF2_CNFNAME_QUERIES
 CODEqueryEtryPt_STD_CONF2_OMOD_QUERIES
 ENDqueryEtryPt
 
@@ -619,6 +606,5 @@ CODESTARTmodInit
 INITLegCnfVars
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 CODEmodInit_QueryRegCFSLineHdlr
 ENDmodInit

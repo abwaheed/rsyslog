@@ -1,7 +1,7 @@
 /* lookup.c
  * Support for lookup tables in RainerScript.
  *
- * Copyright 2013-2017 Adiscon GmbH.
+ * Copyright 2013-2018 Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -39,10 +39,7 @@
 #include "dirty.h"
 #include "unicode-helper.h"
 
-#if !defined(_AIX)
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-
+PRAGMA_IGNORE_Wdeprecated_declarations
 /* definitions for objects we access */
 DEFobjStaticHelpers
 DEFobjCurrIf(glbl)
@@ -462,7 +459,7 @@ build_ArrayTable(lookup_t *pThis, struct json_object *jtab, const uchar *name) {
 	uint32_t i;
 	struct json_object *jrow, *jindex, *jvalue;
 	uchar *canonicalValueRef;
-	uint32_t prev_index, index;
+	uint32_t prev_index, _index;
 	uint8_t prev_index_set;
 	uint32_index_val_t *indexes = NULL;
 	DEFiRet;
@@ -487,21 +484,27 @@ build_ArrayTable(lookup_t *pThis, struct json_object *jtab, const uchar *name) {
 		}
 		qsort(indexes, pThis->nmemb, sizeof(uint32_index_val_t), qs_arrcmp_uint32_index_val);
 		for(i = 0; i < pThis->nmemb; i++) {
-			index = indexes[i].index;
+			_index = indexes[i].index;
 			if (prev_index_set == 0) {
-				prev_index = index;
+				prev_index = _index;
 				prev_index_set = 1;
-				pThis->table.arr->first_key = index;
+				pThis->table.arr->first_key = _index;
 			} else {
-				if (index != ++prev_index) {
+				if (_index != ++prev_index) {
 					LogError(0, RS_RET_INVALID_VALUE, "'array' lookup table name: '%s' "
 					"has non-contiguous members between index '%d' and '%d'",
-									name, prev_index, index);
+									name, prev_index, _index);
 					ABORT_FINALIZE(RS_RET_INVALID_VALUE);
 				}
 			}
-			canonicalValueRef = *(uchar**) bsearch(indexes[i].val, pThis->interned_vals,
-			pThis->interned_val_count, sizeof(uchar*), bs_arrcmp_str);
+			uchar *const *const canonicalValueRef_ptr = bsearch(indexes[i].val, pThis->interned_vals,
+				pThis->interned_val_count, sizeof(uchar*), bs_arrcmp_str);
+			if(canonicalValueRef_ptr == NULL) {
+				LogError(0, RS_RET_ERR, "BUG: canonicalValueRef not found in "
+					"build_ArrayTable(), %s:%d", __FILE__, __LINE__);
+				ABORT_FINALIZE(RS_RET_ERR);
+			}
+			canonicalValueRef = *canonicalValueRef_ptr;
 			assert(canonicalValueRef != NULL);
 			pThis->table.arr->interned_val_refs[i] = canonicalValueRef;
 		}
@@ -536,8 +539,14 @@ build_SparseArrayTable(lookup_t *pThis, struct json_object *jtab, const uchar* n
 			}
 			pThis->table.sprsArr->entries[i].key = (uint32_t) json_object_get_int(jindex);
 			value = (uchar*) json_object_get_string(jvalue);
-			canonicalValueRef = *(uchar**) bsearch(value, pThis->interned_vals,
-			pThis->interned_val_count, sizeof(uchar*), bs_arrcmp_str);
+			uchar *const *const canonicalValueRef_ptr = bsearch(value, pThis->interned_vals,
+				pThis->interned_val_count, sizeof(uchar*), bs_arrcmp_str);
+			if(canonicalValueRef_ptr == NULL) {
+				LogError(0, RS_RET_ERR, "BUG: canonicalValueRef not found in "
+					"build_SparseArrayTable(), %s:%d", __FILE__, __LINE__);
+				ABORT_FINALIZE(RS_RET_ERR);
+			}
+			canonicalValueRef = *canonicalValueRef_ptr;
 			assert(canonicalValueRef != NULL);
 			pThis->table.sprsArr->entries[i].interned_val_ref = canonicalValueRef;
 		}
@@ -706,7 +715,7 @@ lookupFindTable(uchar *name)
  */
 static rsRetVal
 lookupReloadOrStub(lookup_ref_t *pThis, const uchar* stub_val) {
-	lookup_t *newlu, *oldlu; /* dummy to be able to use support functions without 
+	lookup_t *newlu, *oldlu; /* dummy to be able to use support functions without
 								affecting current settings. */
 	DEFiRet;
 
@@ -1000,16 +1009,17 @@ lookupTableDefProcessCnf(struct cnfobj *o)
 	strcpy(reloader_thd_name, reloader_prefix);
 	strcpy(reloader_thd_name + strlen(reloader_prefix), (char*) lu->name);
 	reloader_thd_name[thd_name_len - 1] = '\0';
-  #if defined(__NetBSD__)
-     pthread_setname_np(lu->reloader, "%s", reloader_thd_name);
-  #elif defined(__APPLE__)
-     pthread_setname_np(reloader_thd_name); // must check
-  #else
-     pthread_setname_np(lu->reloader, reloader_thd_name);
-  #endif
+#if defined(__NetBSD__)
+	pthread_setname_np(lu->reloader, "%s", reloader_thd_name);
+#elif defined(__APPLE__)
+	pthread_setname_np(reloader_thd_name); // must check
+#else
+	pthread_setname_np(lu->reloader, reloader_thd_name);
+#endif
 #endif
 	CHKiRet(lookupReadFile(lu->self, lu->name, lu->filename));
-	DBGPRINTF("lookup table '%s' loaded from file '%s'\n", lu->name, lu->filename);
+	LogMsg(0, RS_RET_OK, LOG_INFO, "lookup table '%s' loaded from file '%s'",
+		lu->name, lu->filename);
 
 finalize_it:
 #ifdef HAVE_PTHREAD_SETNAME_NP

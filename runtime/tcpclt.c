@@ -3,18 +3,18 @@
  * This is the implementation of TCP-based syslog clients (the counterpart
  * of the tcpsrv class).
  *
- * Copyright 2007-2012 Adiscon GmbH.
+ * Copyright 2007-2018 Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,7 +22,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -37,6 +36,7 @@
 #if HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
+#include "rsyslog.h"
 #include "dirty.h"
 #include "syslogd-types.h"
 #include "net.h"
@@ -56,7 +56,7 @@ static int
 CreateSocket(struct addrinfo *addrDest)
 {
 	int fd;
-	struct addrinfo *r; 
+	struct addrinfo *r;
 	
 	r = addrDest;
 
@@ -66,7 +66,7 @@ CreateSocket(struct addrinfo *addrDest)
 			/* We can not allow the TCP sender to block syslogd, at least
 			 * not in a single-threaded design. That would cause rsyslogd to
 			 * loose input messages - which obviously also would affect
-			 * other selector lines, too. So we do set it to non-blocking and 
+			 * other selector lines, too. So we do set it to non-blocking and
 			 * handle the situation ourselfs (by discarding messages). IF we run
 			 * dual-threaded, however, the situation is different: in this case,
 			 * the receivers and the selector line processing are only loosely
@@ -95,7 +95,7 @@ CreateSocket(struct addrinfo *addrDest)
 			char errStr[1024];
 			dbgprintf("couldn't create send socket, reason %s", rs_strerror_r(errno, errStr,
 				sizeof(errStr)));
-		}		
+		}
 		r = r->ai_next;
 	}
 
@@ -106,7 +106,7 @@ CreateSocket(struct addrinfo *addrDest)
 
 
 
-/* Build frame based on selected framing 
+/* Build frame based on selected framing
  * This function was created by pulling code from TCPSend()
  * on 2007-12-27 by rgerhards. Older comments are still relevant.
  *
@@ -170,7 +170,7 @@ TCPSendBldFrame(tcpclt_t *pThis, char **pmsg, size_t *plen, int *pbMustBeFreed)
 			 * I have added this comment so that the logic is not accidently
 			 * changed again. rgerhards, 2005-10-25
 			 */
-			if((buf = MALLOC(len + 2)) == NULL) {
+			if((buf = malloc(len + 2)) == NULL) {
 				/* extreme mem shortage, try to solve
 				 * as good as we can. No point in calling
 				 * any alarms, they might as well run out
@@ -218,7 +218,7 @@ TCPSendBldFrame(tcpclt_t *pThis, char **pmsg, size_t *plen, int *pbMustBeFreed)
 		/* IETF20061218 iLenBuf =
 		  snprintf(szLenBuf, sizeof(szLenBuf), "%d ", len + iLenBuf);*/
 
-		if((buf = MALLOC(len + iLenBuf)) == NULL) {
+		if((buf = malloc(len + iLenBuf)) == NULL) {
 			/* we are out of memory. This is an extreme situation. We do not
 			 * call any alarm handlers because they most likely run out of mem,
 			 * too. We are brave enough to call debug output, though. Other than
@@ -280,7 +280,7 @@ finalize_it:
  * rgerhards, 2006-11-30
  * I greatly restructured the function to be more generic and work
  * with function pointers. So it now can be used with any type of transport,
- * as long as it follows stream semantics. This was initially done to 
+ * as long as it follows stream semantics. This was initially done to
  * support plain TCP and GSS via common code.
  */
 static int
@@ -310,7 +310,7 @@ Send(tcpclt_t *pThis, void *pData, char *msg, size_t len)
 
 		if(iRet == RS_RET_OK || iRet == RS_RET_DEFER_COMMIT || iRet == RS_RET_PREVIOUS_COMMITTED) {
 			/* we are done, we also use this as indication that the previous
-			 * message was succesfully received (it's not always the case, but its at 
+			 * message was succesfully received (it's not always the case, but its at
 			 * least our best shot at it -- rgerhards, 2008-03-12
 			 * As of 2008-06-09, we have implemented an algorithm which detects connection
 			 * loss quite good in some (common) scenarios. Thus, the probability of
@@ -325,7 +325,7 @@ Send(tcpclt_t *pThis, void *pData, char *msg, size_t len)
 				 * happens is that we lose our message recovery buffer - anything else would
 				 * be worse, so don't try anything ;) -- rgerhards, 2008-03-12
 				 */
-				if((pThis->prevMsg = MALLOC(len)) != NULL) {
+				if((pThis->prevMsg = malloc(len)) != NULL) {
 					memcpy(pThis->prevMsg, msg, len);
 					pThis->lenPrevMsg = len;
 				}

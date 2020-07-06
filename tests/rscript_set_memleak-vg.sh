@@ -4,22 +4,14 @@
 # https://github.com/rsyslog/rsyslog/issues/1376
 # Copyright 2017-01-24 by Rainer Gerhards
 # This file is part of the rsyslog project, released under ASL 2.0
-
-uname
-if [ `uname` = "FreeBSD" ] ; then
-   echo "This test currently does not work on FreeBSD."
-   exit 77
-fi
-
-. $srcdir/diag.sh init
-. $srcdir/diag.sh generate-conf
-. $srcdir/diag.sh add-conf '
-module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514" ruleset="rcvr")
-
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=5000
+generate_conf
+add_conf '
 template(name="json" type="string" string="%$!%\n")
 template(name="ts" type="string" string="%timestamp:::date-rfc3339%")
-ruleset(name="rcvr" queue.type="LinkedList") {
+ruleset(name="rcvr" queue.type="LinkedList"
+	queue.timeoutShutdown="'$RSTB_GLOBAL_QUEUE_SHUTDOWN_TIMEOUT'") {
 	set $.index="unknown";
 	set $.type="unknown";
 	set $.interval=$$now & ":" & $$hour;
@@ -28,15 +20,15 @@ ruleset(name="rcvr" queue.type="LinkedList") {
 	set $!time_received=$timegenerated;
 	set $!@timestamp=exec_template("ts");
 	action( type="omfile"
-		file="rsyslog.out.log"
+		file=`echo $RSYSLOG_OUT_LOG`
 		template="json"
 	)
 }'
-. $srcdir/diag.sh startup-vg
-. $srcdir/diag.sh tcpflood -m5000
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown-vg
-. $srcdir/diag.sh check-exit-vg
+startup_vg
+injectmsg
+shutdown_when_empty
+wait_shutdown_vg
+check_exit_vg
 # note: we check only the valgrind result, we are not really interested
 # in the output data (non-standard format in any way...)
-. $srcdir/diag.sh exit
+exit_test

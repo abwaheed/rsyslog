@@ -24,11 +24,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -84,7 +84,6 @@ static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __a
 /* internal structures
  */
 DEF_OMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(glbl)
 DEFobjCurrIf(strm)
 DEFobjCurrIf(statsobj)
@@ -306,7 +305,7 @@ getDfltTpl(void)
 
 
 BEGINinitConfVars		/* (re)set config variables to default values */
-CODESTARTinitConfVars 
+CODESTARTinitConfVars
 	pszFileDfltTplName = NULL; /* make sure this can be free'ed! */
 	iRet = resetConfigVariables(NULL, NULL); /* params are dummies */
 ENDinitConfVars
@@ -397,7 +396,7 @@ static rsRetVal setDynaFileCacheSize(void __attribute__((unused)) *pVal, int iNe
 
 /* Helper to cfline(). Parses a output channel name up until the first
  * comma and then looks for the template specifier. Tries
- * to find that template. Maps the output channel to the 
+ * to find that template. Maps the output channel to the
  * proper filed structure settings. Everything is stored in the
  * filed struct. Over time, the dependency on filed might be
  * removed.
@@ -424,7 +423,7 @@ static rsRetVal cflineParseOutchannel(instanceData *pData, uchar* p, omodStringR
 	pOch = ochFind(szBuf, i);
 
 	if(pOch == NULL) {
-		parser_errmsg( 
+		parser_errmsg(
 			 "outchannel '%s' not found - ignoring action line",
 			 szBuf);
 		ABORT_FINALIZE(RS_RET_NOT_FOUND);
@@ -458,14 +457,14 @@ finalize_it:
  * as the index of the to-be-deleted entry. This index may
  * point to an unallocated entry, in whcih case the
  * function immediately returns. Parameter bFreeEntry is 1
- * if the entry should be d_free()ed and 0 if not.
+ * if the entry should be free()ed and 0 if not.
  */
 static rsRetVal
 dynaFileDelCacheEntry(instanceData *__restrict__ const pData, const int iEntry, const int bFreeEntry)
 {
 	dynaFileCacheEntry **pCache = pData->dynCache;
 	DEFiRet;
-	ASSERT(pCache != NULL);
+	assert(pCache != NULL);
 
 	if(pCache[iEntry] == NULL)
 		FINALIZE;
@@ -474,7 +473,7 @@ dynaFileDelCacheEntry(instanceData *__restrict__ const pData, const int iEntry, 
 		pCache[iEntry]->pName == NULL ? UCHAR_CONSTANT("[OPEN FAILED]") : pCache[iEntry]->pName);
 
 	if(pCache[iEntry]->pName != NULL) {
-		d_free(pCache[iEntry]->pName);
+		free(pCache[iEntry]->pName);
 		pCache[iEntry]->pName = NULL;
 	}
 
@@ -487,7 +486,7 @@ dynaFileDelCacheEntry(instanceData *__restrict__ const pData, const int iEntry, 
 	}
 
 	if(bFreeEntry) {
-		d_free(pCache[iEntry]);
+		free(pCache[iEntry]);
 		pCache[iEntry] = NULL;
 	}
 
@@ -504,14 +503,12 @@ static void
 dynaFileFreeCacheEntries(instanceData *__restrict__ const pData)
 {
 	register uint i;
-	ASSERT(pData != NULL);
+	assert(pData != NULL);
 
-	BEGINfunc;
 	for(i = 0 ; i < pData->iCurrCacheSize ; ++i) {
 		dynaFileDelCacheEntry(pData, i, 1);
 	}
 	pData->iCurrElt = -1; /* invalidate current element */
-	ENDfunc;
 }
 
 
@@ -519,13 +516,11 @@ dynaFileFreeCacheEntries(instanceData *__restrict__ const pData)
  */
 static void dynaFileFreeCache(instanceData *__restrict__ const pData)
 {
-	ASSERT(pData != NULL);
+	assert(pData != NULL);
 
-	BEGINfunc;
 	dynaFileFreeCacheEntries(pData);
 	if(pData->dynCache != NULL)
-		d_free(pData->dynCache);
-	ENDfunc;
+		free(pData->dynCache);
 }
 
 
@@ -713,8 +708,8 @@ fsCheck(instanceData *__restrict__ const pData, const uchar *__restrict__ const 
 	iRet = RS_RET_OK;
 
 finalize_it:
-        if (pathcopy != NULL)
-            free(pathcopy);
+	if (pathcopy != NULL)
+		free(pathcopy);
 	RETiRet;
 }
 // </kortemik>
@@ -738,8 +733,8 @@ prepareDynFile(instanceData *__restrict__ const pData, const uchar *__restrict__
 	dynaFileCacheEntry **pCache;
 	DEFiRet;
 
-	ASSERT(pData != NULL);
-	ASSERT(newFileName != NULL);
+	assert(pData != NULL);
+	assert(newFileName != NULL);
 
 	pCache = pData->dynCache;
 
@@ -860,8 +855,8 @@ static  rsRetVal
 doWrite(instanceData *__restrict__ const pData, uchar *__restrict__ const pszBuf, const int lenBuf)
 {
 	DEFiRet;
-	ASSERT(pData != NULL);
-	ASSERT(pszBuf != NULL);
+	assert(pData != NULL);
+	assert(pszBuf != NULL);
 
 	DBGPRINTF("omfile: write to stream, pData->pStrm %p, lenBuf %d, strt data %.128s\n",
 		  pData->pStrm, lenBuf, pszBuf);
@@ -1236,7 +1231,7 @@ initSigprov(instanceData *__restrict__ const pData, struct nvlst *lst)
 	pData->sigprovNameFull = ustrdup(szDrvrName);
 
 	pData->sigprov.ifVersion = sigprovCURR_IF_VERSION;
-	/* The pDrvrName+2 below is a hack to obtain the object name. It 
+	/* The pDrvrName+2 below is a hack to obtain the object name. It
 	 * safes us to have yet another variable with the name without "lm" in
 	 * front of it. If we change the module load interface, we may re-think
 	 * about this hack, but for the time being it is efficient and clean enough.
@@ -1279,7 +1274,7 @@ initCryprov(instanceData *__restrict__ const pData, struct nvlst *lst)
 	pData->cryprovNameFull = ustrdup(szDrvrName);
 
 	pData->cryprov.ifVersion = cryprovCURR_IF_VERSION;
-	/* The pDrvrName+2 below is a hack to obtain the object name. It 
+	/* The pDrvrName+2 below is a hack to obtain the object name. It
 	 * safes us to have yet another variable with the name without "lm" in
 	 * front of it. If we change the module load interface, we may re-think
 	 * about this hack, but for the time being it is efficient and clean enough.
@@ -1399,7 +1394,7 @@ CODESTARTnewActInst
 
 	if(pData->fname == NULL) {
 		parser_errmsg("omfile: either the \"file\" or "
-				"\"dynfile\" parameter must be given");
+				"\"dynafile\" parameter must be given");
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}
 
@@ -1450,13 +1445,13 @@ BEGINparseSelectorAct
 	uchar fname[MAXFNAME];
 CODESTARTparseSelectorAct
 	/* Note: the indicator sequence permits us to use '$' to signify
-	 * outchannel, what otherwise is not possible due to truely 
+	 * outchannel, what otherwise is not possible due to truely
 	 * unresolvable grammar conflicts (*this time no way around*).
 	 * rgerhards, 2011-07-09
 	 */
 	if(!strncmp((char*) p, ":omfile:", sizeof(":omfile:") - 1)) {
 		p += sizeof(":omfile:") - 1;
-	} 
+	}
 	if(!(*p == '$' || *p == '?' || *p == '/' || *p == '.' || *p == '-'))
 		ABORT_FINALIZE(RS_RET_CONFLINE_UNPROCESSED);
 
@@ -1471,7 +1466,7 @@ CODESTARTparseSelectorAct
 	pData->iSizeLimit = 0; /* default value, use outchannels to configure! */
 
 	switch(*p) {
-        case '$':
+	case '$':
 		CODE_STD_STRING_REQUESTparseSelectorAct(1)
 		pData->iNumTpls = 1;
 		/* rgerhards 2005-06-21: this is a special setting for output-channel
@@ -1581,7 +1576,6 @@ ENDdoHUP
 BEGINmodExit
 CODESTARTmodExit
 	objRelease(glbl, CORE_COMPONENT);
-	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(strm, CORE_COMPONENT);
 	objRelease(statsobj, CORE_COMPONENT);
 	DESTROY_ATOMIC_HELPER_MUT(mutClock);
@@ -1604,7 +1598,6 @@ CODESTARTmodInit
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
 INITLegCnfVars
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(strm, CORE_COMPONENT));
 	CHKiRet(objUse(statsobj, CORE_COMPONENT));
 

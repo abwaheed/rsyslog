@@ -1,7 +1,7 @@
 /* nsdpoll_ptcp.c
  *
  * An implementation of the nsd epoll() interface for plain tcp sockets.
- * 
+ *
  * Copyright 2009-2016 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
@@ -70,7 +70,6 @@ addEvent(nsdpoll_ptcp_t *pThis, int id, void *pUsr, int mode, nsd_ptcp_t *pSock,
 	pNew->pUsr = pUsr;
 	pNew->pSock = pSock;
 	pNew->event.events = 0; /* TODO: at some time we should be able to use EPOLLET */
-	//pNew->event.events = EPOLLET;
 	if(mode & NSDPOLL_IN)
 		pNew->event.events |= EPOLLIN;
 	if(mode & NSDPOLL_OUT)
@@ -306,6 +305,12 @@ BEGINObjClassInit(nsdpoll_ptcp, 1, OBJ_IS_CORE_MODULE) /* class, version */
 
 	/* set our own handlers */
 ENDObjClassInit(nsdpoll_ptcp)
+#else
+
+#ifdef __xlc__ /* Xlc require some code, even unused, in source file*/
+static void dummy(void) {}
+#endif
+
 #endif /* #ifdef HAVE_EPOLL_CREATE this module requires epoll! */
 
 /* vi:set ai:

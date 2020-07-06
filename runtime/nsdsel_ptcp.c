@@ -1,7 +1,7 @@
 /* nsdsel_ptcp.c
  *
  * An implementation of the nsd select() interface for plain tcp sockets.
- * 
+ *
  * Copyright 2008-2018 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
@@ -48,7 +48,7 @@ DEFobjCurrIf(glbl)
 BEGINobjConstruct(nsdsel_ptcp) /* be sure to specify the object type also in END macro! */
 	pThis->currfds = 0;
 	pThis->maxfds = FDSET_INCREMENT;
-        CHKmalloc(pThis->fds = calloc(FDSET_INCREMENT, sizeof(struct pollfd)));
+	CHKmalloc(pThis->fds = calloc(FDSET_INCREMENT, sizeof(struct pollfd)));
 finalize_it:
 ENDobjConstruct(nsdsel_ptcp)
 
@@ -97,7 +97,7 @@ finalize_it:
 }
 
 
-/* perform the select()  piNumReady returns how many descriptors are ready for IO 
+/* perform the select()  piNumReady returns how many descriptors are ready for IO
  * TODO: add timeout!
  */
 static rsRetVal ATTR_NONNULL()
@@ -109,13 +109,14 @@ Select(nsdsel_t *const pNsdsel, int *const piNumReady)
 	ISOBJ_TYPE_assert(pThis, nsdsel_ptcp);
 	assert(piNumReady != NULL);
 
-	assert(pThis->currfds >= 1);
+	/* Output debug first*/
 	if(Debug) {
 		dbgprintf("--------<NSDSEL_PTCP> calling poll, active fds (%d): ", pThis->currfds);
 		for(uint32_t i = 0; i <= pThis->currfds; ++i)
 			dbgprintf("%d ", pThis->fds[i].fd);
 		dbgprintf("\n");
 	}
+	assert(pThis->currfds >= 1);
 
 	/* now do the select */
 	*piNumReady = poll(pThis->fds, pThis->currfds, -1);

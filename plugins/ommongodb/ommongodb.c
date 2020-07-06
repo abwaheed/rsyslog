@@ -1,10 +1,7 @@
 /* ommongodb.c
  * Output module for mongodb.
- * Note: this module uses the libmongo-client library. The original 10gen
- * mongodb C interface is crap. Obtain the library here:
- * https://github.com/algernon/libmongo-client
  *
- * Copyright 2007-2016 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2007-2019 Rainer Gerhards and Adiscon GmbH.
  *
  * Copyright 2017 Jeremie Jourdin and Hugo Soszynski and aDvens
  * Remove deprecated libmongo-client and use libmongoc (mongo-c-driver)
@@ -38,20 +35,17 @@
 #include <stdint.h>
 #include <time.h>
 #include <json.h>
+#include "rsyslog.h"
 /* we need this to avoid issues with older versions of libbson */
-#ifndef AIX
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpragmas"
-#pragma GCC diagnostic ignored "-Wunknown-attributes"
-#pragma GCC diagnostic ignored "-Wexpansion-to-defined"
-#endif
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_IGNORE_Wpragmas
+PRAGMA_IGNORE_Wunknown_warning_option
+PRAGMA_IGNORE_Wunknown_attribute
+PRAGMA_IGNORE_Wexpansion_to_defined
 #include <mongoc.h>
 #include <bson.h>
-#ifndef AIX
-#pragma GCC diagnostic pop
-#endif
+PRAGMA_DIAGNOSTIC_POP
 
-#include "rsyslog.h"
 #include "conf.h"
 #include "syslogd-types.h"
 #include "srUtils.h"
@@ -60,6 +54,7 @@
 #include "datetime.h"
 #include "errmsg.h"
 #include "cfsysline.h"
+#include "parserif.h"
 #include "unicode-helper.h"
 
 MODULE_TYPE_OUTPUT
@@ -68,23 +63,24 @@ MODULE_CNFNAME("ommongodb")
 /* internal structures
  */
 DEF_OMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(datetime)
 
 typedef struct _instanceData {
 	struct json_tokener *json_tokener; /* only if (tplName != NULL) */
 	mongoc_client_t *client;
-   	mongoc_collection_t *collection;
-   	bson_error_t error;
-    	char *server;
-    	char *port;
-    	char *uristr;
-    	char *ssl_ca;
-    	char *ssl_cert;
-    	char *uid;
-    	char *pwd;
-   	char *db;
-   	char *collection_name;
+	mongoc_collection_t *collection;
+	bson_error_t error;
+	char *server;
+	char *port;
+	char *uristr;
+	char *ssl_ca;
+	char *ssl_cert;
+	char *uid;
+	char *pwd;
+	uint32_t allowed_error_codes[256];
+	int allowed_error_codes_nbr;
+	char *db;
+	char *collection_name;
 	char *tplName;
 	int bErrMsgPermitted;	/* only one errmsg permitted per connection */
 } instanceData;
@@ -106,7 +102,8 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "pwd", eCmdHdlrGetWord, 0 },
 	{ "db", eCmdHdlrGetWord, 0 },
 	{ "collection", eCmdHdlrGetWord, 0 },
-	{ "template", eCmdHdlrGetWord, 0 }
+	{ "template", eCmdHdlrGetWord, 0 },
+	{ "allowed_error_codes", eCmdHdlrArray, 0 }
 };
 static struct cnfparamblk actpblk =
 	{ CNFPARAMBLK_VERSION,
@@ -138,11 +135,11 @@ static void closeMongoDB(instanceData *pData)
 {
 	if(pData->client != NULL) {
 		if (pData->collection != NULL) {
-   		    mongoc_collection_destroy (pData->collection);
+			mongoc_collection_destroy (pData->collection);
 		}
 
-   		mongoc_client_destroy (pData->client);
-   		mongoc_cleanup ();
+		mongoc_client_destroy (pData->client);
+		mongoc_cleanup ();
 	}
 }
 
@@ -183,7 +180,7 @@ static void
 reportMongoError(instanceData *pData)
 {
 	if(pData->bErrMsgPermitted) {
-		errmsg.LogError(0, RS_RET_ERR, "ommongodb: error: %s", pData->error.message);
+		LogError(0, RS_RET_ERR, "ommongodb: error: %s", pData->error.message);
 		pData->bErrMsgPermitted = 0;
 	}
 }
@@ -201,18 +198,22 @@ static rsRetVal initMongoDB(instanceData *pData, int bSilent)
 	mongoc_init ();
 	pData->client = mongoc_client_new (pData->uristr);
 	if (pData->ssl_cert && pData->ssl_ca) {
+#ifdef HAVE_MONGOC_CLIENT_SET_SSL_OPTS
 		mongoc_ssl_opt_t ssl_opts;
 		memset(&ssl_opts, 0, sizeof(mongoc_ssl_opt_t));
-   		ssl_opts.pem_file = pData->ssl_cert;
-   		ssl_opts.ca_file = pData->ssl_ca;
-   		mongoc_client_set_ssl_opts (pData->client, &ssl_opts);
+		ssl_opts.pem_file = pData->ssl_cert;
+		ssl_opts.ca_file = pData->ssl_ca;
+		mongoc_client_set_ssl_opts (pData->client, &ssl_opts);
+#else
+		dbgprintf("ommongodb: mongo-c-driver was not built with SSL options, ssl directives will not be used.");
+#endif
 	}
 	if(pData->client == NULL) {
 		if(!bSilent) {
 			reportMongoError(pData);
 			dbgprintf("ommongodb: can not initialize MongoDB handle");
 		}
-                ABORT_FINALIZE(RS_RET_SUSPENDED);
+		ABORT_FINALIZE(RS_RET_SUSPENDED);
 	}
 	pData->collection = mongoc_client_get_collection (pData->client, pData->db, pData->collection_name);
 
@@ -314,18 +315,18 @@ static bson_t *getDefaultBSON(smsg_t *pMsg)
 
 	doc = bson_new ();
 	bson_oid_t oid;
-   	bson_oid_init (&oid, NULL);
-   	BSON_APPEND_OID (doc, "_id", &oid);
-   	BSON_APPEND_UTF8 (doc, "sys", sys);
-   	BSON_APPEND_DATE_TIME (doc, "time", ts_gen);
-   	BSON_APPEND_DATE_TIME (doc, "time_rcvd", ts_rcv);
-   	BSON_APPEND_UTF8 (doc, "msg", msg);
-   	BSON_APPEND_INT32 (doc, "syslog_fac", facil);
-   	BSON_APPEND_INT32 (doc, "syslog_sever", severity);
-   	BSON_APPEND_UTF8 (doc, "syslog_tag", tag);
-   	BSON_APPEND_UTF8 (doc, "procid", procid);
-   	BSON_APPEND_UTF8 (doc, "pid", pid);
-   	BSON_APPEND_UTF8 (doc, "level", getLumberjackLevel(pMsg->iSeverity));
+	bson_oid_init (&oid, NULL);
+	BSON_APPEND_OID (doc, "_id", &oid);
+	BSON_APPEND_UTF8 (doc, "sys", sys);
+	BSON_APPEND_DATE_TIME (doc, "time", ts_gen);
+	BSON_APPEND_DATE_TIME (doc, "time_rcvd", ts_rcv);
+	BSON_APPEND_UTF8 (doc, "msg", msg);
+	BSON_APPEND_INT32 (doc, "syslog_fac", facil);
+	BSON_APPEND_INT32 (doc, "syslog_sever", severity);
+	BSON_APPEND_UTF8 (doc, "syslog_tag", tag);
+	BSON_APPEND_UTF8 (doc, "procid", procid);
+	BSON_APPEND_UTF8 (doc, "pid", pid);
+	BSON_APPEND_UTF8 (doc, "level", getLumberjackLevel(pMsg->iSeverity));
 
 	if(procid_free) free(procid);
 	if(tag_free) free(tag);
@@ -363,7 +364,6 @@ BSONAppendJSONObject(bson_t *doc, const char *name, struct json_object *json)
 			return BSON_APPEND_INT64(doc, name, i);
 	}
 	case json_type_object: {
-
 		if (BSONAppendExtendedJSON(doc, name, json) == TRUE)
 		    return TRUE;
 
@@ -392,12 +392,18 @@ BSONAppendJSONObject(bson_t *doc, const char *name, struct json_object *json)
 		/* Convert text to ISODATE when needed */
 		if (strncmp(name, "date", 5) == 0 || strncmp(name, "time", 5) == 0 ) {
 			struct tm tm;
-			if (strptime(json_object_get_string(json), "%Y-%m-%dT%H:%M:%S:%Z", &tm) != NULL ) {
+			const char *datestr = json_object_get_string(json);
+			if( strptime(datestr, "%Y-%m-%dT%H:%M:%S:%Z", &tm) != NULL ||
+					strptime(datestr, "%Y-%m-%dT%H:%M:%S%Z", &tm) != NULL ||
+					strptime(datestr, "%Y-%m-%dT%H:%M:%SZ", &tm) != NULL) {
+				tm.tm_isdst = -1;
 				time_t epoch;
 				int64 ts;
-				epoch = mktime(&tm) ;
+				epoch = mktime(&tm);
 				ts = 1000 * (int64) epoch;
 				return BSON_APPEND_DATE_TIME (doc, name, ts);
+			} else {
+				DBGPRINTF("Unknown date format of field '%s' : '%s' \n", name, datestr);
 			}
 		}
 		else {
@@ -490,9 +496,9 @@ static bson_t *BSONFromJSONObject(struct json_object *json)
 	return doc;
 
 error:
-        if(doc != NULL)
-                bson_destroy(doc);
-        return NULL;
+	if(doc != NULL)
+		bson_destroy(doc);
+	return NULL;
 
 }
 
@@ -502,6 +508,23 @@ CODESTARTtryResume
 		iRet = initMongoDB(pWrkrData->pData, 1);
 	}
 ENDtryResume
+
+/*
+ * Check if `code` is in the allowed error codes.
+ * Return 1 if so, 0 otherwise.
+ */
+static int is_allowed_error_code(instanceData const* pData, uint32_t code)
+{
+	int i;
+
+	i = 0;
+	while (i < pData->allowed_error_codes_nbr) {
+		if (code == pData->allowed_error_codes[i])
+			return 1;
+		++i;
+	}
+	return 0;
+}
 
 BEGINdoAction_NoStrings
 	bson_t *doc = NULL;
@@ -521,11 +544,12 @@ CODESTARTdoAction
 	}
 	if(doc == NULL) {
 		dbgprintf("ommongodb: error creating BSON doc\n");
-		/* FIXME: is this a correct return code? */
 		ABORT_FINALIZE(RS_RET_ERR);
 	}
 	if (mongoc_collection_insert (pData->collection, MONGOC_INSERT_NONE, doc, NULL, &(pData->error) ) ) {
 		pData->bErrMsgPermitted = 1;
+	} else if (is_allowed_error_code(pData, pData->error.code)) {
+		dbgprintf("ommongodb: insert error: allowing error code\n");
 	} else {
 		dbgprintf("ommongodb: insert error\n");
 		reportMongoError(pData);
@@ -553,6 +577,8 @@ static void setInstParamDefaults(instanceData *pData)
 	pData->db = NULL;
 	pData->collection = NULL;
 	pData->tplName = NULL;
+	memset (pData->allowed_error_codes, 0, 256 * sizeof(uint32_t));
+	pData->allowed_error_codes_nbr = 0;
 }
 
 BEGINnewActInst
@@ -592,6 +618,21 @@ CODESTARTnewActInst
 			pData->pwd = (char*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "template")) {
 			pData->tplName = (char*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if(!strcmp(actpblk.descr[i].name, "allowed_error_codes")) {
+			const int maxerrcodes = sizeof(pData->allowed_error_codes) / sizeof(uint32_t);
+			pData->allowed_error_codes_nbr = pvals[i].val.d.ar->nmemb;
+			if(pData->allowed_error_codes_nbr > maxerrcodes) {
+				parser_errmsg("ommongodb: %d allowed_error_codes given, but max "
+					"supported number is %d. Only the first %d error codes will "
+					"be accepted", pData->allowed_error_codes_nbr, maxerrcodes, maxerrcodes);
+				pData->allowed_error_codes_nbr = maxerrcodes;
+			}
+			for(int j = 0 ; j <  pData->allowed_error_codes_nbr ; ++j) {
+				const char *const str = es_str2cstr(pvals[i].val.d.ar->arr[j], NULL);
+				assert(str != NULL);
+				pData->allowed_error_codes[j] = (unsigned)atoi(str);
+				free((void*)str);
+			}
 		} else {
 			dbgprintf("ommongodb: program error, non-handled "
 			  "param '%s'\n", actpblk.descr[i].name);
@@ -634,7 +675,7 @@ CODESTARTnewActInst
 		if(pData->uid && pData->pwd){
 			uid = strlen(pData->uid);
 			pwd = strlen(pData->pwd);
-			uri_len += uid + pwd + strlen("?authMechanism=PLAIN") + 2;
+			uri_len += uid + pwd + 2;
 		}
 		if(pData->ssl_ca && pData->ssl_cert)
 			uri_len += strlen("?ssl=true"); /* "?ssl=true" & "&ssl=true" are the same size */
@@ -643,7 +684,7 @@ CODESTARTnewActInst
 		 * Formatting string "by hand" is a lot faster on execution than a snprintf for example.
 		 */
 		CHKmalloc(pData->uristr = malloc(uri_len + 1));
-		tmp = stpncpy(pData->uristr, "mongodb://", 10);
+		tmp = stpncpy(pData->uristr, "mongodb://", 11);
 		if(pData->uid && pData->pwd){
 			dbgprintf("ommongodb: Adding uid & pwd to uristr.\n");
 			tmp = stpncpy(tmp, pData->uid, uid);
@@ -660,14 +701,12 @@ CODESTARTnewActInst
 		tmp = stpncpy(tmp, pData->port, port);
 		*tmp = '/';
 		++tmp;
-		if(pData->uid && pData->pwd)
-			tmp = stpncpy(tmp, "?authMechanism=PLAIN", 20);
 		if(pData->ssl_ca && pData->ssl_cert){
 			dbgprintf("ommongodb: Adding ssl to uristr.\n");
 			if(pData->uid && pData->pwd)
-				tmp = stpncpy(tmp, "&ssl=true", 9);
+				tmp = stpncpy(tmp, "&ssl=true", 10);
 			else
-				tmp = stpncpy(tmp, "?ssl=true", 9);
+				tmp = stpncpy(tmp, "?ssl=true", 10);
 		}
 		*tmp = '\0';
 	}
@@ -684,7 +723,6 @@ NO_LEGACY_CONF_parseSelectorAct
 
 BEGINmodExit
 CODESTARTmodExit
-	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(datetime, CORE_COMPONENT);
 ENDmodExit
 
@@ -704,7 +742,6 @@ BEGINmodInit()
 CODESTARTmodInit
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(datetime, CORE_COMPONENT));
 	INITChkCoreFeature(bCoreSupportsBatching, CORE_FEATURE_BATCHING);
 	DBGPRINTF("ommongodb: module compiled with rsyslog version %s.\n", VERSION);

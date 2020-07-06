@@ -1,6 +1,6 @@
 /* lib_ksils12.c - rsyslog's KSI-LS12 support library
  *
- * Regarding the online algorithm for Merkle tree signing. Expected 
+ * Regarding the online algorithm for Merkle tree signing. Expected
  * calling sequence is:
  *
  * sigblkConstruct
@@ -11,24 +11,24 @@
  *    sigblkFinishKSI
  * sigblkDestruct
  *
- * Obviously, the next call after sigblkFinsh must either be to 
+ * Obviously, the next call after sigblkFinsh must either be to
  * sigblkInitKSI or sigblkDestruct (if no more signature blocks are
  * to be emitted, e.g. on file close). sigblkDestruct saves state
  * information (most importantly last block hash) and sigblkConstruct
  * reads (or initilizes if not present) it.
  *
- * Copyright 2013-2017 Adiscon GmbH and Guardtime, Inc.
+ * Copyright 2013-2018 Adiscon GmbH and Guardtime, Inc.
  *
  * This file is part of rsyslog.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -55,6 +55,7 @@
 #include <ksi/tlv_element.h>
 #include <ksi/hash.h>
 #include <ksi/net_async.h>
+#include <ksi/net_ha.h>
 #include <ksi/net_uri.h>
 #include <ksi/signature_builder.h>
 #include "rsyslog.h"
@@ -67,8 +68,6 @@
 #endif
 
 #define KSI_BUF_SIZE 4096
-
-#define debug_report(ctx, args...) do { if(ctx->debug>0) report(ctx, args); } while(0)
 
 static const char *blockFileSuffix = ".logsig.parts/blocks.dat";
 static const char *sigFileSuffix = ".logsig.parts/block-signatures.dat";
@@ -91,9 +90,14 @@ typedef enum QITEM_type_en {
 
 /* Worker queue item status identifier */
 typedef enum QITEM_status_en {
+	/* State assigned to any item added to queue (initial state). */
 	QITEM_WAITING = 0x00,
+
+	/* State assigned to #QITEM_SIGNATURE_REQUEST item when it is sent out. */
 	QITEM_SENT,
-	QITEM_DONE,
+
+	/* State assigned to #QITEM_SIGNATURE_REQUEST item when request failed or succeeded. */
+	QITEM_DONE
 } QITEM_status;
 
 
@@ -101,15 +105,21 @@ typedef enum QITEM_status_en {
 typedef struct QueueItem_st {
 	QITEM_type type;
 	QITEM_status status;
-	void *arg;
-	uint64_t intarg1;
-	uint64_t intarg2;
+	KSI_DataHash *root;
+	FILE *file;				/* To keep track of the target signature file. */
+	uint64_t intarg1;		/* Block time limit or record count or not used. */
+	uint64_t intarg2;		/* Level of the sign request or not used. */
 	KSI_AsyncHandle *respHandle;
 	int ksi_status;
 	time_t request_time;
 } QueueItem;
 
-bool add_queue_item(rsksictx ctx, QITEM_type type, void *arg, uint64_t intarg1, uint64_t intarg2);
+static bool queueAddCloseFile(rsksictx ctx, ksifile kf);
+static bool queueAddNewFile(rsksictx ctx, ksifile kf);
+static bool queueAddQuit(rsksictx ctx);
+static bool queueAddSignRequest(rsksictx ctx, ksifile kf, KSI_DataHash *root, unsigned level);
+static int sigblkFinishKSINoSignature(ksifile ksi, const char *reason);
+
 void *signer_thread(void *arg);
 
 static void __attribute__((format(printf, 2, 3)))
@@ -141,13 +151,28 @@ reportErr(rsksictx ctx, const char *const errmsg)
 done:	return;
 }
 
+static const char *
+level2str(int level) {
+	switch (level) {
+	case KSI_LOG_DEBUG: return "DEBUG";
+	case KSI_LOG_INFO: return "INFO";
+	case KSI_LOG_NOTICE: return "NOTICE";
+	case KSI_LOG_WARN: return "WARN";
+	case KSI_LOG_ERROR: return "ERROR";
+	default: return "UNKNOWN LOG LEVEL";
+	}
+}
+
 void
 reportKSIAPIErr(rsksictx ctx, ksifile ksi, const char *apiname, int ecode)
 {
 	char errbuf[4096];
-	snprintf(errbuf, sizeof(errbuf), "%s[%s:%d]: %s",
+	char ksi_errbuf[4096];
+	KSI_ERR_getBaseErrorMessage(ctx->ksi_ctx, ksi_errbuf, sizeof(ksi_errbuf), NULL, NULL);
+	snprintf(errbuf, sizeof(errbuf), "%s[%s:%d]: %s (%s)",
 		(ksi == NULL) ? (uchar*) "" : ksi->blockfilename,
-		apiname, ecode, KSI_getErrorString(ecode));
+		apiname, ecode, KSI_getErrorString(ecode), ksi_errbuf);
+
 	errbuf[sizeof(errbuf)-1] = '\0';
 	reportErr(ctx, errbuf);
 }
@@ -174,7 +199,7 @@ rsksifileConstruct(rsksictx ctx) {
 	ksi->ctx = ctx;
 	ksi->hashAlg = ctx->hashAlg;
 	ksi->blockTimeLimit = ctx->blockTimeLimit;
-	ksi->blockSizeLimit = 1 << (ctx->blockLevelLimit - 1);
+	ksi->blockSizeLimit = 1 << (ctx->effectiveBlockLevelLimit - 1);
 	ksi->bKeepRecordHashes = ctx->bKeepRecordHashes;
 	ksi->bKeepTreeHashes = ctx->bKeepTreeHashes;
 	ksi->lastLeaf[0] = ctx->hashAlg;
@@ -210,7 +235,7 @@ tlvWriteHeader8(FILE *f, int flags, uint8_t tlvtype, int len) {
 	buf[1] = len & 0xff;
 
 	return tlvWriteOctetString(f, buf, 2);
-} 
+}
 
 static int
 tlvWriteHeader16(FILE *f, int flags, uint16_t tlvtype, uint16_t len)
@@ -359,7 +384,7 @@ done:
 }
 
 static int
-tlvCreateMetadata(ksifile ksi, uint64_t record_index, const char *key, 
+tlvCreateMetadata(ksifile ksi, uint64_t record_index, const char *key,
 		const char *value, unsigned char *buffer, size_t *len) {
 	int r = 0;
 	KSI_TlvElement *metadata = NULL, *attrib_tlv = NULL;
@@ -393,6 +418,97 @@ done:
 	if (index_tlv) KSI_Integer_free(index_tlv);
 
 	return r;
+}
+
+#define KSI_FILE_AMOUNT_INC 32
+
+static int
+rsksiExpandRegisterIfNeeded(rsksictx ctx, size_t inc) {
+	int ret = RSGTE_INTERNAL;
+	ksifile *tmp = NULL;
+
+	if (ctx == NULL || inc == 0) {
+		return RSGTE_INTERNAL;
+	}
+
+	if (ctx->ksiCount < ctx->ksiCapacity) {
+		return RSGTE_SUCCESS;
+	}
+
+	/* If needed allocate memory for the buffer. */
+	tmp = (ksifile*)realloc(ctx->ksi,  sizeof(ksifile) * (ctx->ksiCapacity + inc));
+	if (tmp == NULL) {
+		ret = RSGTE_OOM;
+		goto done;
+	}
+
+	/* Make sure that allocated pointers are all set to NULL. */
+	memset(tmp + ctx->ksiCapacity, 0, sizeof(ksifile) * inc);
+
+	/* Update buffer capacity. */
+	ctx->ksiCapacity += inc;
+	ctx->ksi = tmp;
+	tmp = NULL;
+	ret = RSGTE_SUCCESS;
+
+done:
+	free(tmp);
+	return ret;
+}
+
+static int
+rsksiRegisterKsiFile(rsksictx ctx, ksifile ksi) {
+	int ret = RSGTE_INTERNAL;
+
+	if (ctx == NULL || ksi == NULL) {
+		return RSGTE_INTERNAL;
+	}
+
+	/* To be extra sure that ksifile buffer is initialized correctly, clear variables. */
+	if (ctx->ksi == NULL) {
+		ctx->ksiCount = 0;
+		ctx->ksiCapacity = 0;
+	}
+
+	ret = rsksiExpandRegisterIfNeeded(ctx, KSI_FILE_AMOUNT_INC);
+	if (ret != RSGTE_SUCCESS) goto done;
+
+	ctx->ksi[ctx->ksiCount] = ksi;
+	ctx->ksiCount++;
+	ret = RSGTE_SUCCESS;
+
+done:
+	return ret;
+}
+
+static int
+rsksiDeregisterKsiFile(rsksictx ctx, ksifile ksi) {
+	int ret = RSGTE_INTERNAL;
+	size_t i = 0;
+
+	if (ctx == NULL || ksi == NULL) {
+		return RSGTE_INTERNAL;
+	}
+
+
+	for (i = 0; i < ctx->ksiCount; i++) {
+		if (ctx->ksi[i] != NULL && ctx->ksi[i] == ksi) {
+			size_t lastElement = ctx->ksiCount - 1;
+
+			if (i != lastElement) {
+				ctx->ksi[i] = ctx->ksi[lastElement];
+			}
+
+			ctx->ksi[lastElement] = NULL;
+
+			ctx->ksiCount--;
+			ret = RSGTE_SUCCESS;
+			goto done;
+		}
+	}
+
+done:
+	return ret;
 }
 
 /* support for old platforms - graceful degrade */
@@ -479,7 +595,7 @@ ksiCloseSigFile(ksifile ksi) {
 	fclose(ksi->blockFile);
 	ksi->blockFile = NULL;
 	if (ksi->ctx->syncMode == LOGSIG_ASYNCHRONOUS)
-		add_queue_item(ksi->ctx, QITEM_CLOSE_FILE, 0, 0, 0);
+		queueAddCloseFile(ksi->ctx, ksi);
 
 	ksiWwriteStateFile(ksi);
 	return 0;
@@ -560,24 +676,72 @@ ksiCreateFile(rsksictx ctx, const char *path, uid_t uid, gid_t gid, int mode, bo
 
 	if (stat_st.st_size == 0 && header != NULL) {
 		if(fwrite(header, strlen(header), 1, f) != 1) {
-        	        report(ctx, "ksiOpenSigFile: fwrite for file %s failed: %s",
+			report(ctx, "ksiOpenSigFile: fwrite for file %s failed: %s",
 				path, strerror(errno));
-	                goto done;
+			goto done;
 		}
 	}
-
+	/* Write header immediately as when using dynafile it is possible that the same
+	 * file is opened 2x in sequence (caused by small dynafile cache where files are
+	 * frequently closed and reopened). If the header already exists double header is
+	 * not written. The content of the file is ordered by signer thread.
+	 */
+	fflush(f);
 done:
 	return f;
 }
+
+static void handle_ksi_config(rsksictx ctx, KSI_AsyncService *as, KSI_Config *config) {
+	KSI_Integer *ksi_int = NULL;
+	uint64_t tmpInt, newLevel, res;
+
+	if (KSI_Config_getMaxRequests(config, &ksi_int) == KSI_OK && ksi_int != NULL) {
+		tmpInt = KSI_Integer_getUInt64(ksi_int);
+		ctx->max_requests=tmpInt;
+		report(ctx, "KSI gateway has reported a max requests value of %llu",
+			(long long unsigned) tmpInt);
+
+		if(as) {
+			res = KSI_AsyncService_setOption(as, KSI_ASYNC_OPT_MAX_REQUEST_COUNT,
+				(void*) (ctx->max_requests));
+			if(res != KSI_OK)
+				reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_setOption(max_request)", res);
+
+			KSI_AsyncService_setOption(as, KSI_ASYNC_OPT_REQUEST_CACHE_SIZE,
+				(void*) (5*ctx->max_requests));
+		}
+	}
+
+	ksi_int = NULL;
+	if(KSI_Config_getMaxLevel(config, &ksi_int) == KSI_OK && ksi_int != NULL) {
+		tmpInt = KSI_Integer_getUInt64(ksi_int);
+		report(ctx, "KSI gateway has reported a max level value of %llu",
+			(long long unsigned) tmpInt);
+		newLevel=MIN(tmpInt, ctx->blockLevelLimit);
+		if(ctx->effectiveBlockLevelLimit != newLevel) {
+			report(ctx, "Changing the configured block level limit from %llu to %llu",
+			(long long unsigned) ctx->effectiveBlockLevelLimit,
+			(long long unsigned) newLevel);
+			ctx->effectiveBlockLevelLimit = newLevel;
+		}
+		else if(tmpInt < 2) {
+			report(ctx, "KSI gateway has reported an invalid level limit value (%llu), "
+				"plugin disabled", (long long unsigned) tmpInt);
+			ctx->disabled = true;
+		}
+	}
+}
+
 
 /* note: if file exists, the last hash for chaining must
  * be read from file.
  */
 static int
 ksiOpenSigFile(ksifile ksi) {
-	int r = 0;
+	int r = 0, tmpRes = 0;
 	const char *header;
 	FILE* signatureFile = NULL;
+	KSI_Config *config = NULL;
 
 	if (ksi->ctx->syncMode == LOGSIG_ASYNCHRONOUS)
 		header = LS12_BLOCKFILE_HEADER;
@@ -602,7 +766,8 @@ ksiOpenSigFile(ksifile ksi) {
 			goto done;
 		}
 
-		add_queue_item(ksi->ctx, QITEM_NEW_FILE, signatureFile, time(NULL) + ksi->blockTimeLimit, 0);
+		ksi->sigFile = signatureFile;
+		queueAddNewFile(ksi->ctx, ksi);
 	}
 
 	/* we now need to obtain the last previous hash, so that
@@ -610,6 +775,18 @@ ksiOpenSigFile(ksifile ksi) {
 	 * as a state file error can be recovered by graceful degredation.
 	 */
 	ksiReadStateFile(ksi);
+
+	if (ksi->ctx->syncMode == LOGSIG_SYNCHRONOUS) {
+		tmpRes = KSI_receiveAggregatorConfig(ksi->ctx->ksi_ctx, &config);
+		if(tmpRes == KSI_OK) {
+			handle_ksi_config(ksi->ctx, NULL, config);
+		}
+		else {
+			reportKSIAPIErr(ksi->ctx, NULL, "KSI_receiveAggregatorConfig", tmpRes);
+		}
+		KSI_Config_free(config);
+	}
+
 done:	return r;
 }
 
@@ -642,15 +819,29 @@ seedIVKSI(ksifile ksi)
 	}
 }
 
-static void create_signer_thread(rsksictx ctx) {
-	if (!ctx->thread_started) {
+static int
+create_signer_thread(rsksictx ctx) {
+	if (ctx->signer_state != SIGNER_STARTED) {
 		if (pthread_mutex_init(&ctx->module_lock, 0))
 			report(ctx, "pthread_mutex_init: %s", strerror(errno));
 		ctx->signer_queue = ProtectedQueue_new(10);
-		if (pthread_create(&ctx->signer_thread, NULL, signer_thread, ctx))
+
+		ctx->signer_state = SIGNER_INIT;
+		if (pthread_create(&ctx->signer_thread, NULL, signer_thread, ctx)) {
 			report(ctx, "pthread_mutex_init: %s", strerror(errno));
-		ctx->thread_started = true;
+			ctx->signer_state = SIGNER_IDLE;
+			return RSGTE_INTERNAL;
+		}
+
+		/* Lock until init. */
+		while(*((volatile int*)&ctx->signer_state) & SIGNER_INIT);
+
+		if (ctx->signer_state != SIGNER_STARTED) {
+			return RSGTE_INTERNAL;
+		}
 	}
+
+	return RSGTE_SUCCESS;
 }
 
 rsksictx
@@ -659,7 +850,7 @@ rsksiCtxNew(void) {
 	ctx = calloc(1, sizeof (struct rsksictx_s));
 	KSI_CTX_new(&ctx->ksi_ctx); // TODO: error check (probably via a generic macro?)
 	ctx->hasher = NULL;
-	ctx->hashAlg = KSI_HASHALG_SHA2_256;
+	ctx->hashAlg = KSI_getHashAlgorithmByName("default");
 	ctx->blockTimeLimit = 0;
 	ctx->bKeepTreeHashes = false;
 	ctx->bKeepRecordHashes = true;
@@ -673,10 +864,9 @@ rsksiCtxNew(void) {
 	ctx->fCreateMode = 0644;
 	ctx->fDirCreateMode = 0700;
 	ctx->syncMode = LOGSIG_SYNCHRONOUS;
-	ctx->thread_started = false;
+	ctx->signer_state = SIGNER_IDLE;
 	ctx->disabled = false;
-
-	debug_report(ctx, "debug: signer plugin loaded");
+	ctx->ksi = NULL;
 
 	/*if (pthread_mutex_init(&ctx->module_lock, 0))
 		report(ctx, "pthread_mutex_init: %s", strerror(errno));
@@ -691,56 +881,62 @@ rsksiCtxNew(void) {
 	return ctx;
 }
 
+static
+int rsksiStreamLogger(void *logCtx, int logLevel, const char *message)
+{
+	char time_buf[32];
+	struct tm *tm_info;
+	time_t timer;
+	FILE *f = (FILE *)logCtx;
+
+	timer = time(NULL);
+
+	tm_info = localtime(&timer);
+	if (tm_info == NULL) {
+		return KSI_UNKNOWN_ERROR;
+	}
+
+	if (f != NULL) {
+		flockfile(f);  /* for thread safety */
+		if (strftime(time_buf, sizeof(time_buf), "%d.%m.%Y %H:%M:%S", tm_info)) {
+			if (fprintf(f, "%s [%s] %lu - %s\n", level2str(logLevel),
+						time_buf, pthread_self(), message) > 0) { }
+		}
+		funlockfile(f);
+	}
+
+	return KSI_OK;
+}
+
 int
 rsksiInitModule(rsksictx ctx) {
 	int res = 0;
-	KSI_Config *config = NULL;
-	KSI_Integer *ksi_int = NULL;
-	uint64_t tmpInt;
+
+	if(ctx->debugFileName != NULL) {
+		ctx->debugFile = fopen(ctx->debugFileName, "w");
+		if(ctx->debugFile) {
+			res = KSI_CTX_setLoggerCallback(ctx->ksi_ctx, rsksiStreamLogger, ctx->debugFile);
+			if (res != KSI_OK)
+				reportKSIAPIErr(ctx, NULL, "Unable to set logger callback", res);
+			res = KSI_CTX_setLogLevel(ctx->ksi_ctx, ctx->debugLevel);
+			if (res != KSI_OK)
+				reportKSIAPIErr(ctx, NULL, "Unable to set log level", res);
+		}
+		else {
+			report(ctx, "Could not open logfile %s: %s", ctx->debugFileName, strerror(errno));
+		}
+	}
 
 	KSI_CTX_setOption(ctx->ksi_ctx, KSI_OPT_AGGR_HMAC_ALGORITHM, (void*)((size_t)ctx->hmacAlg));
 
-	res = KSI_receiveAggregatorConfig(ctx->ksi_ctx, &config);
-	if(res == KSI_OK) {
-		if (KSI_Config_getMaxRequests(config, &ksi_int) == KSI_OK && ksi_int != NULL) {
-			tmpInt = KSI_Integer_getUInt64(ksi_int);
-			ctx->max_requests=tmpInt;
-			report(ctx, "KSI gateway has reported a max requests value of %lu", tmpInt);
-		}
-
-		ksi_int = NULL;
-		if(KSI_Config_getMaxLevel(config, &ksi_int) == KSI_OK && ksi_int != NULL) {
-			tmpInt = KSI_Integer_getUInt64(ksi_int);
-			report(ctx, "KSI gateway has reported a max level value of %lu", tmpInt);
-			if(ctx->blockLevelLimit > tmpInt) {
-				report(ctx, "Decreasing the configured block level limit from %lu to %lu "
-				"reported by KSI gateway", ctx->blockLevelLimit, tmpInt);
-				ctx->blockLevelLimit=tmpInt;
-			}
-			else if(tmpInt < 2) {
-				report(ctx, "KSI gateway has reported an invalid level limit value (%lu), "
-					"plugin disabled", tmpInt);
-				ctx->disabled = true;
-				res = KSI_INVALID_ARGUMENT;
-				goto done;
-			}
-		}
-	}
-	else {
-		reportKSIAPIErr(ctx, NULL, "KSI_receiveAggregatorConfig", res);
-	}
-
-	create_signer_thread(ctx);
-
-done:
-	KSI_Config_free(config);
-	return res;
+	return create_signer_thread(ctx);
 }
 
 /* either returns ksifile object or NULL if something went wrong */
 ksifile
 rsksiCtxOpenFile(rsksictx ctx, unsigned char *logfn)
 {
+	int ret = RSGTE_INTERNAL;
 	ksifile ksi;
 	char fn[MAXFNAME+1];
 
@@ -751,8 +947,14 @@ rsksiCtxOpenFile(rsksictx ctx, unsigned char *logfn)
 
 	/* The thread cannot be be created in rsksiCtxNew because in daemon mode the
 	 process forks after rsksiCtxNew and the thread disappears */
-	if (!ctx->thread_started)
-			rsksiInitModule(ctx);
+	if (ctx->signer_state != SIGNER_STARTED) {
+		ret = rsksiInitModule(ctx);
+		if (ret != RSGTE_SUCCESS) {
+			report(ctx, "Unable to init. KSI module, signing service disabled");
+			ctx->disabled = true;
+			return NULL;
+		}
+	}
 
 	if ((ksi = rsksifileConstruct(ctx)) == NULL)
 		goto done;
@@ -785,41 +987,57 @@ rsksiCtxOpenFile(rsksictx ctx, unsigned char *logfn)
 	}
 
 done:
-	ctx->ksi = ksi;
+	/* Register ksi file in rsksictx for keeping track of block timeouts. */
+	rsksiRegisterKsiFile(ctx, ksi);
 	pthread_mutex_unlock(&ctx->module_lock);
 	return ksi;
 }
- 
 
-/* returns 0 on succes, 1 if algo is unknown, 2 is algo has been remove
- * because it is now considered insecure
+
+/* Returns RSGTE_SUCCESS on success, error code otherwise. If algo is unknown or
+ * is not trusted, default hash function is used.
  */
 int
 rsksiSetHashFunction(rsksictx ctx, char *algName) {
+	if (ctx == NULL || algName == NULL) {
+		return RSGTE_INTERNAL;
+	}
+
 	int r, id = KSI_getHashAlgorithmByName(algName);
-	if (id == KSI_HASHALG_INVALID) {
-		report(ctx, "Hash function '%s' unknown - using default", algName);
-		ctx->hashAlg = KSI_HASHALG_SHA2_256;
+	if (!KSI_isHashAlgorithmSupported(id)) {
+		report(ctx, "Hash function '%s' is not supported - using default", algName);
+		ctx->hashAlg = KSI_getHashAlgorithmByName("default");
 	} else {
-		ctx->hashAlg = id;
+		if(!KSI_isHashAlgorithmTrusted(id)) {
+			report(ctx, "Hash function '%s' is not trusted - using default", algName);
+			ctx->hashAlg = KSI_getHashAlgorithmByName("default");
+		}
+		else
+			ctx->hashAlg = id;
 	}
 
 	if ((r = KSI_DataHasher_open(ctx->ksi_ctx, ctx->hashAlg, &ctx->hasher)) != KSI_OK) {
 		reportKSIAPIErr(ctx, NULL, "KSI_DataHasher_open", r);
 		ctx->disabled = true;
+		return r;
 	}
 
-	return 0;
+	return RSGTE_SUCCESS;
 }
 
 int
 rsksiSetHmacFunction(rsksictx ctx, char *algName) {
 	int id = KSI_getHashAlgorithmByName(algName);
-	if (id == KSI_HASHALG_INVALID) {
-		report(ctx, "HMAC function '%s' unknown - using default", algName);
-		ctx->hmacAlg = KSI_HASHALG_SHA2_256;
+	if (!KSI_isHashAlgorithmSupported(id)) {
+		report(ctx, "HMAC function '%s' is not supported - using default", algName);
+		ctx->hmacAlg = KSI_getHashAlgorithmByName("default");
 	} else {
-		ctx->hmacAlg = id;
+		if(!KSI_isHashAlgorithmTrusted(id)) {
+			report(ctx, "HMAC function '%s' is not trusted - using default", algName);
+			ctx->hmacAlg = KSI_getHashAlgorithmByName("default");
+		}
+		else
+			ctx->hmacAlg = id;
 	}
 	return 0;
 }
@@ -835,20 +1053,86 @@ rsksifileDestruct(ksifile ksi) {
 
 	ctx = ksi->ctx;
 
+	/* Deregister ksifile so it is not used by signer thread anymore. Note that files are not closed yet! */
+	rsksiDeregisterKsiFile(ctx, ksi);
+
 	if (!ksi->disabled && ksi->bInBlk) {
 		sigblkAddMetadata(ksi, blockCloseReason, "Block closed due to file closure.");
 		r = sigblkFinishKSI(ksi);
 	}
+	/* Note that block file is closed immediately but signature file will be closed
+	 * by the signer thread scheduled by signer thread work queue.
+	 */
 	if(!ksi->disabled)
 		r = ksiCloseSigFile(ksi);
 	free(ksi->blockfilename);
 	free(ksi->statefilename);
 	free(ksi->ksifilename);
-	ctx->ksi = NULL;
+
 	free(ksi);
 
 	pthread_mutex_unlock(&ctx->module_lock);
 	return r;
+}
+
+/* This can only be used when signer thread has terminated or within the thread. */
+static void
+rsksifileForceFree(ksifile ksi) {
+	if (ksi == NULL) return;
+
+	if (ksi->sigFile != NULL) fclose(ksi->sigFile);
+	if (ksi->blockFile != NULL) fclose(ksi->blockFile);
+	free(ksi->blockfilename);
+	free(ksi->statefilename);
+	free(ksi->ksifilename);
+	free(ksi);
+	return;
+}
+
+/* This can only be used when signer thread has terminated or within the thread. */
+static void
+rsksictxForceFreeSignatures(rsksictx ctx) {
+	size_t i = 0;
+
+	if (ctx == NULL || ctx->ksi == NULL) return;
+
+	for (i = 0; i < ctx->ksiCount; i++) {
+		if (ctx->ksi[i] != NULL) {
+			rsksifileForceFree(ctx->ksi[i]);
+			ctx->ksi[i] = NULL;
+		}
+	}
+
+	ctx->ksiCount = 0;
+	return;
+}
+
+/* This can only be used when signer thread has terminated or within the thread. */
+static int
+rsksictxForceCloseWithoutSig(rsksictx ctx, const char *reason) {
+	size_t i = 0;
+	if (ctx == NULL || ctx->ksi == NULL) return RSGTE_INTERNAL;
+	for (i = 0; i < ctx->ksiCount; i++) {
+		if (ctx->ksi[i] != NULL) {
+			int ret = RSGTE_INTERNAL;
+
+			/* Only if block contains records, create metadata, close the block and add
+			 * no signature marker. Closing block without record will produce redundant
+			 * blocks that needs to be signed afterward.
+			 */
+			if (ctx->ksi[i]->nRecords > 0) {
+				ret = sigblkFinishKSINoSignature(ctx->ksi[i], reason);
+				if (ret != RSGTE_SUCCESS) return ret;
+			}
+
+			/* Free files and remove object from the list. */
+			rsksifileForceFree(ctx->ksi[i]);
+			ctx->ksi[i] = NULL;
+		}
+	}
+
+	ctx->ksiCount = 0;
+	return RSGTE_SUCCESS;
 }
 
 void
@@ -856,8 +1140,12 @@ rsksiCtxDel(rsksictx ctx) {
 	if (ctx == NULL)
 		return;
 
-	if (ctx->thread_started) {
-		add_queue_item(ctx, QITEM_QUIT, NULL, 0, 0);
+	/* Note that even in sync. mode signer thread is created and needs to be closed
+	 * correctly.
+	 */
+	if (ctx->signer_state == SIGNER_STARTED) {
+		queueAddQuit(ctx);
+		/* Wait until thread closes to be able to safely free the resources. */
 		pthread_join(ctx->signer_thread, NULL);
 		ProtectedQueue_free(ctx->signer_queue);
 		pthread_mutex_destroy(&ctx->module_lock);
@@ -866,12 +1154,24 @@ rsksiCtxDel(rsksictx ctx) {
 	free(ctx->aggregatorUri);
 	free(ctx->aggregatorId);
 	free(ctx->aggregatorKey);
+	free(ctx->debugFileName);
 
 	if (ctx->random_source)
 		free(ctx->random_source);
 
 	KSI_DataHasher_free(ctx->hasher);
 	KSI_CTX_free(ctx->ksi_ctx);
+
+	if(ctx->debugFile!=NULL)
+		fclose(ctx->debugFile);
+
+	/* After signer thread is terminated there should be no open signature files,
+	 * but to be extra sure that all files are closed, recheck the list of opened
+	 * signature files.
+	 */
+	rsksictxForceFreeSignatures(ctx);
+	free(ctx->ksi);
+
 	free(ctx);
 }
 
@@ -886,6 +1186,11 @@ sigblkInitKSI(ksifile ksi)
 	ksi->nRecords = 0;
 	ksi->bInBlk = 1;
 	ksi->blockStarted = time(NULL); //TODO: maybe milli/nanoseconds should be used
+	ksi->blockSizeLimit = 1 << (ksi->ctx->effectiveBlockLevelLimit - 1);
+
+	/* flush the optional debug file when starting a new block */
+	if(ksi->ctx->debugFile != NULL)
+		fflush(ksi->ctx->debugFile);
 
 done:
 	return;
@@ -927,7 +1232,7 @@ done:
 
 int
 sigblkHashTwoNodes(ksifile ksi, KSI_DataHash **out, KSI_DataHash *left, KSI_DataHash *right,
-          uint8_t level) {
+		uint8_t level) {
 	int r = 0;
 
 	CHKr(KSI_DataHasher_reset(ksi->ctx->hasher));
@@ -992,7 +1297,7 @@ sigblkAddLeaf(ksifile ksi, const uchar *leafData, const size_t leafLength, bool 
 	CHKr(sigblkCreateMask(ksi, &mask));
 	CHKr(sigblkCreateHash(ksi, &leafHash, leafData, leafLength));
 
-	if(ksi->nRecords == 0) 
+	if(ksi->nRecords == 0)
 		tlvWriteBlockHdrKSI(ksi);
 
 	/* metadata record has to be written into the block file too*/
@@ -1052,30 +1357,42 @@ done:
 
 static int
 sigblkCheckTimeOut(rsksictx ctx) {
-	int ret = 0;
+	int ret = RSGTE_INTERNAL;
 	time_t now;
 	char buf[KSI_BUF_SIZE];
+	size_t i = 0;
+
+	if (ctx == NULL) {
+		return RSGTE_INTERNAL;
+	}
 
 	pthread_mutex_lock(&ctx->module_lock);
 
-	if (!ctx->ksi || ctx->disabled || !ctx->blockTimeLimit || !ctx->ksi->bInBlk)
+	if (ctx->ksi == NULL || ctx->disabled || !ctx->blockTimeLimit) {
+		ret = RSGTE_SUCCESS;
 		goto done;
+	}
 
 	now = time(NULL);
 
-	if (ctx->ksi->blockStarted + ctx->blockTimeLimit > now)
-		goto done;
+	for (i = 0; i < ctx->ksiCount; i++) {
+		ksifile ksi = ctx->ksi[i];
 
-	snprintf(buf, KSI_BUF_SIZE, "Block closed due to reaching time limit %d", ctx->blockTimeLimit);
+		if (ksi == NULL) continue;	/* To avoide unexpected crash. */
+		if (!ksi->bInBlk) continue; /* Not inside a block, nothing to close nor sign. */
+		if ((time_t) (ksi->blockStarted + ctx->blockTimeLimit) > now) continue;
 
-	sigblkAddMetadata(ctx->ksi, blockCloseReason, buf);
-	sigblkFinishKSI(ctx->ksi);
-	sigblkInitKSI(ctx->ksi);
+		snprintf(buf, KSI_BUF_SIZE, "Block closed due to reaching time limit %d", ctx->blockTimeLimit);
+		sigblkAddMetadata(ksi, blockCloseReason, buf);
+		sigblkFinishKSI(ksi);
+		sigblkInitKSI(ksi);
+	}
 
 done:
 	pthread_mutex_unlock(&ctx->module_lock);
 	return ret;
 }
+
 
 static int
 sigblkSign(ksifile ksi, KSI_DataHash *hash, int level)
@@ -1128,29 +1445,34 @@ signing_done:
 
 unsigned
 sigblkCalcLevel(unsigned leaves) {
-    unsigned level = 0;
-    unsigned c = leaves;
-    while (c > 1) {
-        level++;
-        c >>= 1;
-    }
+	unsigned level = 0;
+	unsigned c = leaves;
+	while (c > 1) {
+		level++;
+		c >>= 1;
+	}
 
-    if (1 << level < (int)leaves)
-        level++;
+	if (1 << level < (int)leaves)
+		level++;
 
-    return level;
+	return level;
 }
 
-int
-sigblkFinishKSI(ksifile ksi)
-{
-	KSI_DataHash *root, *rootDel;
-	int8_t j;
-	int ret = 0;
-	unsigned level = 0;
+static int
+sigblkFinishTree(ksifile ksi, KSI_DataHash **hsh) {
+	int ret = RSGTE_INTERNAL;
+	KSI_DataHash *root = NULL;
+	KSI_DataHash *rootDel = NULL;
+	int8_t j = 0;
 
-	if (ksi->nRecords == 0)
+	if (ksi == NULL || hsh == NULL) {
 		goto done;
+	}
+
+	if (ksi->nRecords == 0) {
+		ret = RSGTE_SUCCESS;
+		goto done;
+	}
 
 	root = NULL;
 	for(j = 0 ; j < ksi->nRoots ; ++j) {
@@ -1159,15 +1481,48 @@ sigblkFinishKSI(ksifile ksi)
 			ksi->roots[j] = NULL;
 		} else if (ksi->roots[j] != NULL) {
 			rootDel = root;
+			root = NULL;
 			ret = sigblkHashTwoNodes(ksi, &root, ksi->roots[j], rootDel, j + 2);
 			KSI_DataHash_free(ksi->roots[j]);
 			ksi->roots[j] = NULL;
 			KSI_DataHash_free(rootDel);
-			if(ksi->bKeepTreeHashes)
+			rootDel = NULL;
+			if(ksi->bKeepTreeHashes) {
 				tlvWriteHashKSI(ksi, 0x0903, root);
-			if(ret != 0) goto done; /* checks hash_node_ksi() result! */
+			}
+			if(ret != KSI_OK) goto done; /* checks sigblkHashTwoNodes() result! */
 		}
 	}
+
+	*hsh = root;
+	root = NULL;
+	ret = RSGTE_SUCCESS;
+
+done:
+	KSI_DataHash_free(root);
+	KSI_DataHash_free(rootDel);
+	return ret;
+}
+
+
+int
+sigblkFinishKSI(ksifile ksi)
+{
+	KSI_DataHash *root = NULL;
+	int ret = RSGTE_INTERNAL;
+	unsigned level = 0;
+
+	if (ksi == NULL) {
+		goto done;
+	}
+
+	if (ksi->nRecords == 0) {
+		ret = RSGTE_SUCCESS;
+		goto done;
+	}
+
+	ret = sigblkFinishTree(ksi, &root);
+	if (ret != RSGTE_SUCCESS) goto done;
 
 	//Multiplying leaves count by 2 to account for blinding masks
 	level=sigblkCalcLevel(2 * ksi->nRecords);
@@ -1177,16 +1532,61 @@ sigblkFinishKSI(ksifile ksi)
 		ret = tlvWriteNoSigLS12(ksi->blockFile, ksi->nRecords, root, NULL);
 		if (ret != KSI_OK) {
 			reportKSIAPIErr(ksi->ctx, ksi, "tlvWriteNoSigLS12", ret);
-			ret = 1;
+			goto done;
 		}
 
-		add_queue_item(ksi->ctx, QITEM_SIGNATURE_REQUEST, root, ksi->nRecords, level);
+		queueAddSignRequest(ksi->ctx, ksi, root, level);
+		root = NULL;
 	} else {
 		sigblkSign(ksi, root, level);
-		KSI_DataHash_free(root); //otherwise delete it
 	}
 
+	ret = RSGTE_SUCCESS;
+
 done:
+	KSI_DataHash_free(root);
+	free(ksi->IV);
+	ksi->IV = NULL;
+	ksi->bInBlk = 0;
+	return ret;
+}
+
+static int
+sigblkFinishKSINoSignature(ksifile ksi, const char *reason)
+{
+	KSI_DataHash *root = NULL;
+	int ret = RSGTE_INTERNAL;
+
+	if (ksi == NULL || ksi->ctx == NULL ||
+	   (ksi->ctx->syncMode == LOGSIG_ASYNCHRONOUS && ksi->sigFile == NULL) ||
+		ksi->blockFile == NULL || reason == NULL) {
+		goto done;
+	}
+
+	ret = sigblkAddMetadata(ksi, blockCloseReason, reason);
+	if (ret != RSGTE_SUCCESS) goto done;
+
+	ret = sigblkFinishTree(ksi, &root);
+	if (ret != RSGTE_SUCCESS) goto done;
+
+	ret = tlvWriteNoSigLS12(ksi->blockFile, ksi->nRecords, root, reason);
+	if (ret != KSI_OK) {
+		reportKSIAPIErr(ksi->ctx, ksi, "tlvWriteNoSigLS12", ret);
+		goto done;
+	}
+
+	if (ksi->ctx->syncMode == LOGSIG_ASYNCHRONOUS) {
+		ret = tlvWriteNoSigLS12(ksi->sigFile, ksi->nRecords, root, reason);
+		if (ret != KSI_OK) {
+			reportKSIAPIErr(ksi->ctx, ksi, "tlvWriteNoSigLS12", ret);
+			goto done;
+		}
+	}
+
+	ret = RSGTE_SUCCESS;
+
+done:
+	KSI_DataHash_free(root);
 	free(ksi->IV);
 	ksi->IV=NULL;
 	ksi->bInBlk = 0;
@@ -1196,34 +1596,57 @@ done:
 int
 rsksiSetAggregator(rsksictx ctx, char *uri, char *loginid, char *key) {
 	int r;
+	char *strTmp, *strTmpUri;
 
-	if (!uri || !loginid || !key) {
-		ctx->disabled = true;
-		return KSI_INVALID_ARGUMENT;
+	/* only use the strings if they are not empty */
+	ctx->aggregatorUri = (uri != NULL && strlen(uri) != 0) ? strdup(uri) : NULL;
+	ctx->aggregatorId = (loginid != NULL && strlen(loginid) != 0) ? strdup(loginid) : NULL;
+	ctx->aggregatorKey = (key != NULL && strlen(key) != 0) ? strdup(key) : NULL;
+
+	/* split the URI string up for possible HA endpoints */
+	strTmp = ctx->aggregatorUri;
+	while((strTmpUri = strsep(&strTmp, "|") ) != NULL) {
+		if(ctx->aggregatorEndpointCount >= KSI_CTX_HA_MAX_SUBSERVICES) {
+			report(ctx, "Maximum number (%d) of service endoints reached, ignoring endpoint: %s",
+				KSI_CTX_HA_MAX_SUBSERVICES, strTmpUri);
+		}
+		else {
+			ctx->aggregatorEndpoints[ctx->aggregatorEndpointCount] = strTmpUri;
+			ctx->aggregatorEndpointCount++;
+		}
 	}
 
-	r = KSI_CTX_setAggregator(ctx->ksi_ctx, uri, loginid, key);
+	r = KSI_CTX_setAggregator(ctx->ksi_ctx, ctx->aggregatorUri, ctx->aggregatorId, ctx->aggregatorKey);
 	if(r != KSI_OK) {
 		ctx->disabled = true;
 		reportKSIAPIErr(ctx, NULL, "KSI_CTX_setAggregator", r);
 		return KSI_INVALID_ARGUMENT;
 	}
 
-	ctx->aggregatorUri = strdup(uri);
-	ctx->aggregatorId = strdup(loginid);
-	ctx->aggregatorKey = strdup(key);
-
 	return r;
 }
 
-bool add_queue_item(rsksictx ctx, QITEM_type type, void *arg, uint64_t intarg1, uint64_t intarg2) {
+
+int
+rsksiSetDebugFile(rsksictx ctx, char *val) {
+	if(!val)
+		return KSI_INVALID_ARGUMENT;
+
+	ctx->debugFileName=strdup(val);
+	return KSI_OK;
+}
+
+static bool
+add_queue_item(rsksictx ctx, QITEM_type type, KSI_DataHash *root, FILE *sigFile, uint64_t intarg1, uint64_t intarg2) {
 	QueueItem *qi = (QueueItem*) malloc(sizeof (QueueItem));
 	if (!qi) {
 		ctx->disabled = true;
 		return false;
 	}
 
-	qi->arg = arg;
+	qi->root = root;
+	qi->file = sigFile;
+
 	qi->type = type;
 	qi->status = QITEM_WAITING;
 	qi->intarg1 = intarg1;
@@ -1239,91 +1662,28 @@ bool add_queue_item(rsksictx ctx, QITEM_type type, void *arg, uint64_t intarg1, 
 	return true;
 }
 
-//This version of signing thread discards all the requests except last one (no aggregation/pipelining used)
-
-static void process_requests(rsksictx ctx, KSI_CTX *ksi_ctx, FILE* outfile) {
-	QueueItem *item = NULL;
-	QueueItem *lastItem = NULL;
-	unsigned char *der = NULL;
-	size_t lenDer = 0;
-	int r = KSI_OK;
-	KSI_Signature *sig = NULL;
-
-	if(ProtectedQueue_count(ctx->signer_queue) == 0)
-		return;
-
-	while (ProtectedQueue_peekFront(ctx->signer_queue, (void**) &item) && item->type == QITEM_SIGNATURE_REQUEST) {
-		if (lastItem != NULL) {
-			if (outfile)
-				tlvWriteNoSigLS12(outfile, lastItem->intarg1, lastItem->arg, 
-						"Signature request dropped for block, signer queue full");
-			report(ctx, "Signature request dropped for block, signer queue full");
-
-			/* the main thread has to be locked when the hash is freed to avoid a race condition */
-			/* TODO: this need more elegant solution, hash should be detached from creation context*/
-			pthread_mutex_lock(&ctx->module_lock);
-			KSI_DataHash_free(lastItem->arg);
-			pthread_mutex_unlock(&ctx->module_lock);
-			free(lastItem);
-		}
-
-		ProtectedQueue_popFront(ctx->signer_queue, (void**) &item);
-		lastItem = item;
-	}
-
-	if (!outfile)
-		goto signing_failed;
-
-	if(!lastItem || item->type != QITEM_SIGNATURE_REQUEST)
-		return;
-
-	if(lastItem->arg == NULL) {
-		r = KSI_INVALID_ARGUMENT;
-		goto signing_failed;
-	}
-
-	r = KSI_Signature_signAggregated(ksi_ctx, lastItem->arg, lastItem->intarg2, &sig);
-	if (r != KSI_OK) {
-		reportKSIAPIErr(ctx, NULL, "KSI_Signature_createAggregated", r);
-		goto signing_failed;
-	}
-
-	/* Serialize Signature. */
-	r = KSI_Signature_serialize(sig, &der, &lenDer);
-	if (r != KSI_OK) {
-		reportKSIAPIErr(ctx, NULL, "KSI_Signature_serialize", r);
-		lenDer = 0;
-		goto signing_failed;
-	}
-
-signing_failed:
-
-	if (outfile) {
-		if (r == KSI_OK)
-			r = tlvWriteKSISigLS12(outfile, lastItem->intarg1, der, lenDer);
-		else
-			r = tlvWriteNoSigLS12(outfile, lastItem->intarg1, lastItem->arg, KSI_getErrorString(r));
-	}
-
-	if (r != KSI_OK)
-		reportKSIAPIErr(ctx, NULL, "tlvWriteKSISigLS12", r);
-
-	if (lastItem != NULL) {
-		/* the main thread has to be locked when the hash is freed to avoid a race condition */
-		/* TODO: this need more elegant solution, hash should be detached from creation context*/
-		pthread_mutex_lock(&ctx->module_lock);
-		KSI_DataHash_free(lastItem->arg);
-		pthread_mutex_unlock(&ctx->module_lock);
-		free(lastItem);
-	}
-
-	if (sig != NULL)
-		KSI_Signature_free(sig);
-	if (der != NULL)
-		KSI_free(der);
+static bool
+queueAddCloseFile(rsksictx ctx, ksifile ksi) {
+	return add_queue_item(ctx, QITEM_CLOSE_FILE, NULL, ksi->sigFile, 0, 0);
 }
 
-static bool save_response(rsksictx ctx, FILE* outfile, QueueItem *item) {
+static bool
+queueAddNewFile(rsksictx ctx, ksifile ksi) {
+	return add_queue_item(ctx, QITEM_NEW_FILE, NULL, ksi->sigFile, time(NULL) + ctx->blockTimeLimit, 0);
+}
+
+static bool
+queueAddQuit(rsksictx ctx) {
+	return add_queue_item(ctx, QITEM_QUIT, NULL, NULL, 0, 0);
+}
+
+static bool
+queueAddSignRequest(rsksictx ctx, ksifile ksi, KSI_DataHash *root, unsigned level) {
+	return add_queue_item(ctx, QITEM_SIGNATURE_REQUEST, root, ksi->sigFile, ksi->nRecords, level);
+}
+
+static bool
+save_response(rsksictx ctx, FILE* outfile, QueueItem *item) {
 	bool ret = false;
 	KSI_Signature *sig = NULL;
 	unsigned char *raw = NULL;
@@ -1339,68 +1699,85 @@ static bool save_response(rsksictx ctx, FILE* outfile, QueueItem *item) {
 		KSI_free(raw);
 	}
 	else {
-		tlvWriteNoSigLS12(outfile, item->intarg1, item->arg, KSI_getErrorString(item->ksi_status));
+		tlvWriteNoSigLS12(outfile, item->intarg1, item->root, KSI_getErrorString(item->ksi_status));
 	}
 	ret = true;
 
 cleanup:
 	if(res != KSI_OK)
-		tlvWriteNoSigLS12(outfile, item->intarg1, item->arg, KSI_getErrorString(res));
+		tlvWriteNoSigLS12(outfile, item->intarg1, item->root, KSI_getErrorString(res));
 
 	KSI_Signature_free(sig);
 
 	return ret;
 }
 
-static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncService *as, FILE* outfile) {
+static bool
+process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncService *as) {
 	bool ret = false;
 	QueueItem *item = NULL;
 	int res = KSI_OK, tmpRes;
 	KSI_AsyncHandle *reqHandle = NULL;
 	KSI_AsyncHandle *respHandle = NULL;
 	KSI_AggregationReq *req = NULL;
+	KSI_Config *config = NULL;
 	KSI_Integer *level;
-	int state;
+	long extError;
+	KSI_Utf8String *errorMsg;
+	int state, ksi_status;
 	unsigned i;
 	size_t p;
 
 	KSI_AsyncService_getPendingCount(as, &p);
-	debug_report(ctx, "debug: entering, pending: %zu", p);
 
 	/* Check if there are pending/available responses and associate them with the request items */
 	while(true) {
 		respHandle = NULL;
+		item = NULL;
 		tmpRes=KSI_AsyncService_run(as, &respHandle, &p);
 		if(tmpRes!=KSI_OK)
 			reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_run", tmpRes);
 
 		if (respHandle == NULL) { /* nothing received */
-			debug_report(ctx, "debug: dispatch returned NULL, p = %zu", p);
 			break;
 		}
 
 		state = KSI_ASYNC_STATE_UNDEFINED;
 
 		CHECK_KSI_API(KSI_AsyncHandle_getState(respHandle, &state), ctx, "KSI_AsyncHandle_getState");
-		CHECK_KSI_API(KSI_AsyncHandle_getRequestCtx(respHandle, (const void**)&item), ctx,
-			"KSI_AsyncHandle_getRequestCtx");
 
-		if(item == NULL) { /* must never happen */
-			reportErr(ctx, "KSI_AsyncHandle_getRequestCtx returned NULL as context");
-			continue;
+		if(state == KSI_ASYNC_STATE_PUSH_CONFIG_RECEIVED) {
+			res = KSI_AsyncHandle_getConfig(respHandle, &config);
+			if(res == KSI_OK) {
+				handle_ksi_config(ctx, as, config);
+				KSI_AsyncHandle_free(respHandle);
+			} else
+				reportKSIAPIErr(ctx, NULL, "KSI_AsyncHandle_getConfig", res);
 		}
-
-		if(state == KSI_ASYNC_STATE_RESPONSE_RECEIVED) {
+		else if(state == KSI_ASYNC_STATE_RESPONSE_RECEIVED) {
+			CHECK_KSI_API(KSI_AsyncHandle_getRequestCtx(respHandle, (const void**)&item), ctx,
+				"KSI_AsyncHandle_getRequestCtx");
 			item->respHandle = respHandle;
 			item->ksi_status = KSI_OK;
 		}
-		else {
-			KSI_AsyncHandle_getError(respHandle, &item->ksi_status);
+		else if(state == KSI_ASYNC_STATE_ERROR) {
+			CHECK_KSI_API(KSI_AsyncHandle_getRequestCtx(respHandle, (const void**)&item), ctx,
+				"KSI_AsyncHandle_getRequestCtx");
+			errorMsg = NULL;
+			KSI_AsyncHandle_getError(respHandle, &ksi_status);
+			KSI_AsyncHandle_getExtError(respHandle, &extError);
+			KSI_AsyncHandle_getErrorMessage(respHandle, &errorMsg);
+			report(ctx, "Asynchronous request returned error %s (%d), %lu %s",
+				KSI_getErrorString(ksi_status), ksi_status, extError,
+					errorMsg ? KSI_Utf8String_cstr(errorMsg) : "");
 			KSI_AsyncHandle_free(respHandle);
+
+			if(item)
+				item->ksi_status = ksi_status;
 		}
 
-		debug_report(ctx, "debug: pending_requests: %zu", p);
-		item->status = QITEM_DONE;
+		if(item)
+			item->status = QITEM_DONE;
 	}
 
 	KSI_AsyncService_getPendingCount(as, &p);
@@ -1410,7 +1787,6 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 		item = NULL;
 		if(!ProtectedQueue_getItem(ctx->signer_queue, i, (void**)&item) || !item)
 			continue;
-
 		/* ingore non request queue items */
 		if(item->type != QITEM_SIGNATURE_REQUEST)
 			continue;
@@ -1419,11 +1795,9 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 		if(item->status != QITEM_WAITING)
 			continue;
 
-		debug_report(ctx, "debug: sending: %u", i);
-
 		CHECK_KSI_API(KSI_AggregationReq_new(ksi_ctx, &req), ctx, "KSI_AggregationReq_new");
 		CHECK_KSI_API(KSI_AggregationReq_setRequestHash((KSI_AggregationReq*)req,
-			KSI_DataHash_ref((KSI_DataHash*)item->arg)), ctx,
+			KSI_DataHash_ref(item->root)), ctx,
 			"KSI_AggregationReq_setRequestHash");
 		CHECK_KSI_API(KSI_Integer_new(ksi_ctx, item->intarg2, &level), ctx,
 			"KSI_Integer_new");
@@ -1436,7 +1810,6 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 		res = KSI_AsyncService_addRequest(as, reqHandle); /* this can fail because of throttling */
 
 		if (res == KSI_OK) {
-			debug_report(ctx, "debug: sent: %u", i);
 			item->status = QITEM_SENT;
 
 			tmpRes=KSI_AsyncService_run(as, NULL, NULL);
@@ -1444,15 +1817,14 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 				reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_run", tmpRes);
 
 		} else {
+			reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_addRequest", res);
 			KSI_AsyncHandle_free(reqHandle);
-			debug_report(ctx, "debug: Unable to add request, err=%d", item->ksi_status);
 			item->status = QITEM_DONE;
 			item->ksi_status = res;
 			break;
 		}
 	}
 
-	debug_report(ctx, "debug: queue size %zu", ProtectedQueue_count(ctx->signer_queue));
 
 	/* Save all consequent fulfilled responses in the front of the queue to the signature file */
 	while(ProtectedQueue_count(ctx->signer_queue)) {
@@ -1473,14 +1845,13 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 		if(item->status != QITEM_DONE)
 			break;
 
-		//debug_report(ctx, "debug: saving %u, status %d", (unsigned)item->handle, item->ksi_status);
 		ProtectedQueue_popFront(ctx->signer_queue, (void**) &item);
-		save_response(ctx, outfile, item);
-
+		save_response(ctx, item->file, item);
+		fflush(item->file);
 		/* the main thread has to be locked when the hash is freed to avoid a race condition */
 		/* TODO: this need more elegant solution, hash should be detached from creation context*/
 		pthread_mutex_lock(&ctx->module_lock);
-		KSI_DataHash_free(item->arg);
+		KSI_DataHash_free(item->root);
 		KSI_AsyncHandle_free(item->respHandle);
 		free(item);
 		pthread_mutex_unlock(&ctx->module_lock);
@@ -1490,88 +1861,162 @@ static bool process_requests_async(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncServ
 
 cleanup:
 	KSI_AsyncService_getPendingCount(as, &p);
-	debug_report(ctx, "debug: leaving, pending: %zu, q. size %zu, ret: %d", p,
-		ProtectedQueue_count(ctx->signer_queue), ret);
 	return ret;
 }
 
+/* This can only be used when signer thread has terminated or within the thread. */
+static bool
+rsksictxCloseAllPendingBlocksWithoutSignature(rsksictx ctx, const char *reason) {
+	bool ret = false;
+	QueueItem *item = NULL;
+	int res = KSI_OK;
+
+	/* Save all consequent fulfilled responses in the front of the queue to the signature file */
+	while(ProtectedQueue_count(ctx->signer_queue)) {
+		item = NULL;
+		ProtectedQueue_popFront(ctx->signer_queue, (void**) &item);
+
+		if(item == NULL) {
+			continue;
+		}
+
+		/* Skip non request queue item. */
+		if(item->type == QITEM_SIGNATURE_REQUEST) {
+			res = tlvWriteNoSigLS12(item->file, item->intarg1, item->root, reason);
+			if (res != KSI_OK) {
+				reportKSIAPIErr(ctx, NULL, "tlvWriteNoSigLS12", res);
+				ret = false;
+				goto cleanup;
+			}
+			fflush(item->file);
+		}
+
+		KSI_DataHash_free(item->root);
+		KSI_AsyncHandle_free(item->respHandle);
+		free(item);
+	}
+
+	ret = true;
+
+cleanup:
+	return ret;
+}
+
+
+static void
+request_async_config(rsksictx ctx, KSI_CTX *ksi_ctx, KSI_AsyncService *as) {
+	KSI_Config *cfg = NULL;
+	KSI_AsyncHandle *cfgHandle = NULL;
+	KSI_AggregationReq *cfgReq = NULL;
+	int res;
+	bool bSuccess = false;
+
+	CHECK_KSI_API(KSI_AggregationReq_new(ksi_ctx, &cfgReq), ctx, "KSI_AggregationReq_new");
+	CHECK_KSI_API(KSI_Config_new(ksi_ctx, &cfg), ctx, "KSI_Config_new");
+	CHECK_KSI_API(KSI_AggregationReq_setConfig(cfgReq, cfg), ctx, "KSI_AggregationReq_setConfig");
+	CHECK_KSI_API(KSI_AsyncAggregationHandle_new(ksi_ctx, cfgReq, &cfgHandle), ctx,
+			"KSI_AsyncAggregationHandle_new");
+	CHECK_KSI_API(KSI_AsyncService_addRequest(as, cfgHandle), ctx, "KSI_AsyncService_addRequest");
+
+	bSuccess = true;
+
+cleanup:
+	if(!bSuccess) {
+		if(cfgHandle)
+			KSI_AsyncHandle_free(cfgHandle);
+		else if(cfgReq)
+			KSI_AggregationReq_free(cfgReq);
+		else if(cfg)
+			KSI_Config_free(cfg);
+	}
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"
 void *signer_thread(void *arg) {
 
 	rsksictx ctx = (rsksictx) arg;
 	QueueItem *item = NULL;
-	FILE* ksiFile = NULL;
+	size_t ksiFileCount = 0;
 	time_t timeout;
 	KSI_CTX *ksi_ctx;
 	KSI_AsyncService *as = NULL;
 	int res = 0;
 	bool ret = false;
-
-	ctx->thread_started = true;
-	debug_report(ctx, "debug: Starting signer thread");
+	int i = 0, endpoints = 0;
 
 	CHECK_KSI_API(KSI_CTX_new(&ksi_ctx), ctx, "KSI_CTX_new");
-	CHECK_KSI_API(KSI_CTX_setAggregator(ksi_ctx, ctx->aggregatorUri, ctx->aggregatorId, ctx->aggregatorKey),
+	CHECK_KSI_API(KSI_CTX_setAggregator(ksi_ctx,
+		ctx->aggregatorUri, ctx->aggregatorId, ctx->aggregatorKey),
 		ctx, "KSI_CTX_setAggregator");
+
+
+	if(ctx->debugFile) {
+		res = KSI_CTX_setLoggerCallback(ksi_ctx, rsksiStreamLogger, ctx->debugFile);
+		if (res != KSI_OK)
+			reportKSIAPIErr(ctx, NULL, "Unable to set logger callback", res);
+		res = KSI_CTX_setLogLevel(ksi_ctx, ctx->debugLevel);
+		if (res != KSI_OK)
+			reportKSIAPIErr(ctx, NULL, "Unable to set log level", res);
+	}
+
 	CHECK_KSI_API(KSI_CTX_setOption(ksi_ctx, KSI_OPT_AGGR_HMAC_ALGORITHM, (void*)((size_t)ctx->hmacAlg)),
 		ctx, "KSI_CTX_setOption");
 
-	res = KSI_SigningAsyncService_new(ksi_ctx, &as);
+	res = KSI_SigningHighAvailabilityService_new(ksi_ctx, &as);
 	if (res != KSI_OK) {
 		reportKSIAPIErr(ctx, NULL, "KSI_SigningAsyncService_new", res);
 	}
 	else {
-		res = KSI_AsyncService_setEndpoint(as, ctx->aggregatorUri, ctx->aggregatorId, ctx->aggregatorKey);
-		if (res != KSI_OK) {
+		for (i = 0; i < ctx->aggregatorEndpointCount; i++) {
+			res = KSI_AsyncService_addEndpoint(as,
+					ctx->aggregatorEndpoints[i], ctx->aggregatorId, ctx->aggregatorKey);
+			if (res != KSI_OK) {
 				//This can fail if the protocol is not supported by async api.
-				//in this case the plugin will fall back to sync api
-				KSI_AsyncService_free(as);
-			as=NULL;
-		} else {
-			res = KSI_AsyncService_setOption(as, KSI_ASYNC_OPT_MAX_REQUEST_COUNT,
-				(void*) (ctx->max_requests));
-			if (res != KSI_OK)
-				reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_setOption(max_request)", res);
+				reportKSIAPIErr(ctx, NULL, "KSI_AsyncService_addEndpoint", res);
+				continue;
+			}
 
-			/* ingoring the possible error here */
-			KSI_AsyncService_setOption(as, KSI_ASYNC_OPT_REQUEST_CACHE_SIZE,
-				(void*) (ctx->max_requests * 5));
+			endpoints++;
 		}
 	}
 
+	if(endpoints == 0) { /* no endpoint accepted, deleting the service */
+		report(ctx, "No endpoints added, signing service disabled");
+		ctx->disabled = true;
+		KSI_AsyncService_free(as);
+		as=NULL;
+		goto cleanup;
+	}
+
+	KSI_AsyncService_setOption(as, KSI_ASYNC_OPT_REQUEST_CACHE_SIZE,
+		(void*) (ctx->max_requests));
+
+	ctx->signer_state = SIGNER_STARTED;
 	while (true) {
 		timeout = 1;
 
 		/* Wait for a work item or timeout*/
 		ProtectedQueue_waitForItem(ctx->signer_queue, NULL, timeout * 1000);
-		debug_report(ctx, "debug: ProtectedQueue_waitForItem");
 		/* Check for block time limit*/
 		sigblkCheckTimeOut(ctx);
 
 		/* in case there are no items go around*/
-		if (ProtectedQueue_count(ctx->signer_queue) == 0)
+		if (ProtectedQueue_count(ctx->signer_queue) == 0) {
+			process_requests_async(ctx, ksi_ctx, as);
 			continue;
-
-		/* process signing requests only if there is an open signature file */
-		if(ksiFile != NULL) {
-			if(as != NULL) {
-				/* in case of asynchronous service check for pending/unsent requests */
-				ret = process_requests_async(ctx, ksi_ctx, as, ksiFile);
-				if(!ret) {
-					// probably fatal error, disable signing, error should be already reported
-					ctx->disabled = true;
-					goto cleanup;
-				}
-			}
-			else {
-				/* drain all consecutive signature requests from the queue and add
-				 * the last one to aggregation request */
-				if (ProtectedQueue_peekFront(ctx->signer_queue, (void**) &item)
-					&& item->type == QITEM_SIGNATURE_REQUEST) {
-					process_requests(ctx, ksi_ctx, ksiFile);
-				}
-			}
 		}
 
+		/* process signing requests only if there is an open signature file */
+		if(ksiFileCount > 0) {
+			/* check for pending/unsent requests in asynchronous service */
+			ret = process_requests_async(ctx, ksi_ctx, as);
+			if(!ret) {
+				// probably fatal error, disable signing, error should be already reported
+				ctx->disabled = true;
+				goto cleanup;
+			}
+		}
 		/* if there are sig. requests still in the front, then we have to start over*/
 		if (ProtectedQueue_peekFront(ctx->signer_queue, (void**) &item)
 			&& item->type == QITEM_SIGNATURE_REQUEST)
@@ -1580,19 +2025,28 @@ void *signer_thread(void *arg) {
 		/* Handle other types of work items */
 		if (ProtectedQueue_popFront(ctx->signer_queue, (void**) &item) != 0) {
 			if (item->type == QITEM_CLOSE_FILE) {
-				if (ksiFile) {
-					debug_report(ctx, "debug: sig-thread closing file %p", ksiFile);
-					fclose(ksiFile);
-					ksiFile = NULL;
+				if (item->file) {
+					fclose(item->file);
+					item->file = NULL;
 				}
+
+				if (ksiFileCount > 0) ksiFileCount--;
 			} else if (item->type == QITEM_NEW_FILE) {
-				debug_report(ctx, "debug: sig-thread opening new file %p", item->arg);
-				ksiFile = (FILE*) item->arg;
+				ksiFileCount++;
+				request_async_config(ctx, ksi_ctx, as);
+				/* renew the config when opening a new file */
 			} else if (item->type == QITEM_QUIT) {
-				if (ksiFile)
-					fclose(ksiFile);
 				free(item);
-				debug_report(ctx, "debug: sig-thread quitting");
+
+				/* Will look into work queue for pending KSI signatures and will output
+				 * unsigned block marker instead of actual KSI signature to finalize this
+				 * thread quickly.
+				 */
+				rsksictxCloseAllPendingBlocksWithoutSignature(ctx,
+					"Signing not finished due to sudden closure of lmsig_ksi-ls12 module.");
+				rsksictxForceCloseWithoutSig(ctx,
+					"Block closed due to sudden closure of lmsig_ksi-ls12 module.");
+
 				goto cleanup;
 			}
 			free(item);
@@ -1600,8 +2054,11 @@ void *signer_thread(void *arg) {
 	}
 
 cleanup:
+
 	KSI_AsyncService_free(as);
 	KSI_CTX_free(ksi_ctx);
-	ctx->thread_started = false;
+	ctx->signer_state = SIGNER_STOPPED;
+
 	return NULL;
 }
+#pragma GCC diagnostic push

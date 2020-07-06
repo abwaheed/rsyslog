@@ -1,10 +1,10 @@
 /* netstrm.c
- * 
+ *
  * This class implements a generic netstrmwork stream class. It supports
  * sending and receiving data streams over a netstrmwork. The class abstracts
  * the transport, though it is a safe assumption that TCP is being used.
  * The class has a number of properties, among which are also ones to
- * select privacy settings, eg by enabling TLS and/or GSSAPI. In the 
+ * select privacy settings, eg by enabling TLS and/or GSSAPI. In the
  * long run, this class shall provide all stream-oriented netstrmwork
  * functionality inside rsyslog.
  *
@@ -96,7 +96,7 @@ AbortDestruct(netstrm_t **ppThis)
 
 /* accept an incoming connection request
  * The netstrm instance that had the incoming request must be provided. If
- * the connection request succeeds, a new netstrm object is created and 
+ * the connection request succeeds, a new netstrm object is created and
  * passed back to the caller. The caller is responsible for destructing it.
  * pReq is the nsd_t obj that has the accept request.
  * rgerhards, 2008-04-21
@@ -136,7 +136,8 @@ finalize_it:
  */
 static rsRetVal
 LstnInit(netstrms_t *pNS, void *pUsr, rsRetVal(*fAddLstn)(void*,netstrm_t*),
-	 uchar *pLstnPort, uchar *pLstnIP, int iSessMax)
+	 uchar *pLstnPort, uchar *pLstnIP, int iSessMax,
+	 uchar *pszLstnPortFileName)
 {
 	DEFiRet;
 
@@ -144,7 +145,7 @@ LstnInit(netstrms_t *pNS, void *pUsr, rsRetVal(*fAddLstn)(void*,netstrm_t*),
 	assert(fAddLstn != NULL);
 	assert(pLstnPort != NULL);
 
-	CHKiRet(pNS->Drvr.LstnInit(pNS, pUsr, fAddLstn, pLstnPort, pLstnIP, iSessMax));
+	CHKiRet(pNS->Drvr.LstnInit(pNS, pUsr, fAddLstn, pLstnPort, pLstnIP, iSessMax, pszLstnPortFileName));
 
 finalize_it:
 	RETiRet;
@@ -199,6 +200,17 @@ SetDrvrAuthMode(netstrm_t *pThis, uchar *mode)
 }
 
 
+/* set the driver permitexpiredcerts mode -- alorbach, 2018-12-20
+ */
+static rsRetVal
+SetDrvrPermitExpiredCerts(netstrm_t *pThis, uchar *mode)
+{
+	DEFiRet;
+	ISOBJ_TYPE_assert(pThis, netstrm);
+	iRet = pThis->Drvr.SetPermitExpiredCerts(pThis->pDrvrData, mode);
+	RETiRet;
+}
+
 /* set the driver's permitted peers -- rgerhards, 2008-05-19 */
 static rsRetVal
 SetDrvrPermPeers(netstrm_t *pThis, permittedPeers_t *pPermPeers)
@@ -209,6 +221,35 @@ SetDrvrPermPeers(netstrm_t *pThis, permittedPeers_t *pPermPeers)
 	RETiRet;
 }
 
+/* Mandate also verification of Extended key usage / purpose field */
+static rsRetVal
+SetDrvrCheckExtendedKeyUsage(netstrm_t *pThis, int ChkExtendedKeyUsage)
+{
+	DEFiRet;
+	ISOBJ_TYPE_assert(pThis, netstrm);
+	iRet = pThis->Drvr.SetCheckExtendedKeyUsage(pThis->pDrvrData, ChkExtendedKeyUsage);
+	RETiRet;
+}
+
+/* Mandate stricter name checking per RFC 6125 - ignoce CN if any SAN present */
+static rsRetVal
+SetDrvrPrioritizeSAN(netstrm_t *pThis, int prioritizeSan)
+{
+	DEFiRet;
+	ISOBJ_TYPE_assert(pThis, netstrm);
+	iRet = pThis->Drvr.SetPrioritizeSAN(pThis->pDrvrData, prioritizeSan);
+	RETiRet;
+}
+
+/* tls verify depth */
+static rsRetVal
+SetDrvrTlsVerifyDepth(netstrm_t *pThis, int verifyDepth)
+{
+	DEFiRet;
+	ISOBJ_TYPE_assert(pThis, netstrm);
+	iRet = pThis->Drvr.SetTlsVerifyDepth(pThis->pDrvrData, verifyDepth);
+	RETiRet;
+}
 
 /* End of methods to shuffle autentication settings to the driver.
  * -------------------------------------------------------------------------- */
@@ -384,6 +425,7 @@ CODESTARTobjQueryInterface(netstrm)
 	pIf->GetRemAddr = GetRemAddr;
 	pIf->SetDrvrMode = SetDrvrMode;
 	pIf->SetDrvrAuthMode = SetDrvrAuthMode;
+	pIf->SetDrvrPermitExpiredCerts = SetDrvrPermitExpiredCerts;
 	pIf->SetDrvrPermPeers = SetDrvrPermPeers;
 	pIf->CheckConnection = CheckConnection;
 	pIf->GetSock = GetSock;
@@ -392,6 +434,9 @@ CODESTARTobjQueryInterface(netstrm)
 	pIf->SetKeepAliveTime = SetKeepAliveTime;
 	pIf->SetKeepAliveIntvl = SetKeepAliveIntvl;
 	pIf->SetGnutlsPriorityString = SetGnutlsPriorityString;
+	pIf->SetDrvrCheckExtendedKeyUsage = SetDrvrCheckExtendedKeyUsage;
+	pIf->SetDrvrPrioritizeSAN = SetDrvrPrioritizeSAN;
+	pIf->SetDrvrTlsVerifyDepth = SetDrvrTlsVerifyDepth;
 finalize_it:
 ENDobjQueryInterface(netstrm)
 

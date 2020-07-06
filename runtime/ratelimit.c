@@ -2,18 +2,18 @@
  * support for rate-limiting sources, including "last message
  * repeated n times" processing.
  *
- * Copyright 2012-2016 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2012-2020 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -37,7 +37,6 @@
 
 /* definitions for objects we access */
 DEFobjStaticHelpers
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(glbl)
 DEFobjCurrIf(datetime)
 DEFobjCurrIf(parser)
@@ -118,17 +117,17 @@ tellLostCnt(ratelimit_t *ratelimit)
 	uchar msgbuf[1024];
 	if(ratelimit->missed) {
 		snprintf((char*)msgbuf, sizeof(msgbuf),
-			 "%s: %u messages lost due to rate-limiting",
-			 ratelimit->name, ratelimit->missed);
+			 "%s: %u messages lost due to rate-limiting (%u allowed within %u seconds)",
+			 ratelimit->name, ratelimit->missed, ratelimit->burst, ratelimit->interval);
 		ratelimit->missed = 0;
 		logmsgInternal(RS_RET_RATE_LIMITED, LOG_SYSLOG|LOG_INFO, msgbuf, 0);
 	}
 }
 
 /* Linux-like ratelimiting, modelled after the linux kernel
- * returns 1 if message is within rate limit and shall be 
+ * returns 1 if message is within rate limit and shall be
  * processed, 0 otherwise.
- * This implementation is NOT THREAD-SAFE and must not 
+ * This implementation is NOT THREAD-SAFE and must not
  * be called concurrently.
  */
 static int ATTR_NONNULL()
@@ -163,7 +162,7 @@ withinRatelimit(ratelimit_t *__restrict__ const ratelimit,
 		ratelimit->begin = tt;
 
 	/* resume if we go out of time window or if time has gone backwards */
-	if((tt > ratelimit->begin + ratelimit->interval) || (tt < ratelimit->begin) ) {
+	if((tt > (time_t)(ratelimit->begin + ratelimit->interval)) || (tt < ratelimit->begin) ) {
 		ratelimit->begin = 0;
 		ratelimit->done = 0;
 		tellLostCnt(ratelimit);
@@ -211,19 +210,24 @@ ratelimitMsg(ratelimit_t *__restrict__ const ratelimit, smsg_t *pMsg, smsg_t **p
 {
 	DEFiRet;
 	rsRetVal localRet;
+	int severity = 0;
 
 	*ppRepMsg = NULL;
 
-	if((pMsg->msgFlags & NEEDS_PARSING) != 0) {
-		if((localRet = parser.ParseMsg(pMsg)) != RS_RET_OK)  {
-			DBGPRINTF("Message discarded, parsing error %d\n", localRet);
-			ABORT_FINALIZE(RS_RET_DISCARDMSG);
+	if(ratelimit->bReduceRepeatMsgs || ratelimit->severity > 0) {
+		/* consider early parsing only if really needed */
+		if((pMsg->msgFlags & NEEDS_PARSING) != 0) {
+			if((localRet = parser.ParseMsg(pMsg)) != RS_RET_OK)  {
+				DBGPRINTF("Message discarded, parsing error %d\n", localRet);
+				ABORT_FINALIZE(RS_RET_DISCARDMSG);
+			}
+			severity = pMsg->iSeverity;
 		}
 	}
 
 	/* Only the messages having severity level at or below the
 	 * treshold (the value is >=) are subject to ratelimiting. */
-	if(ratelimit->interval && (pMsg->iSeverity >= ratelimit->severity)) {
+	if(ratelimit->interval && (severity >= ratelimit->severity)) {
 		char namebuf[512]; /* 256 for FGDN adn 256 for APPNAME should be enough */
 		snprintf(namebuf, sizeof namebuf, "%s:%s", getHOSTNAME(pMsg),
 			getAPPNAME(pMsg, 0));
@@ -281,12 +285,9 @@ ratelimitAddMsg(ratelimit_t *ratelimit, multi_submit_t *pMultiSub, smsg_t *pMsg)
 			 * at least the previous batch as batch...
 			 */
 			if(pMultiSub->nElem > 0) {
-dbgprintf("RRRRR: ratelimitAddMsg flush multi submit\n");
 				CHKiRet(multiSubmitMsg2(pMultiSub));
 			}
-dbgprintf("RRRRR: ratelimitAddMsg doing singles submit\n");
 			CHKiRet(submitMsg2(pMsg));
-dbgprintf("RRRRR: ratelimitAddMsg done  singles submit\n");
 			FINALIZE;
 		}
 		pMultiSub->ppMsgs[pMultiSub->nElem++] = pMsg;
@@ -295,7 +296,6 @@ dbgprintf("RRRRR: ratelimitAddMsg done  singles submit\n");
 	}
 
 finalize_it:
-dbgprintf("RRRRR: ratelimitAddMsg returns %d\n", iRet);
 	RETiRet;
 }
 
@@ -336,7 +336,7 @@ finalize_it:
 
 /* enable linux-like ratelimiting */
 void
-ratelimitSetLinuxLike(ratelimit_t *ratelimit, unsigned short interval, unsigned burst)
+ratelimitSetLinuxLike(ratelimit_t *ratelimit, unsigned int interval, unsigned int burst)
 {
 	ratelimit->interval = interval;
 	ratelimit->burst = burst;
@@ -398,7 +398,6 @@ ratelimitModExit(void)
 {
 	objRelease(datetime, CORE_COMPONENT);
 	objRelease(glbl, CORE_COMPONENT);
-	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(parser, CORE_COMPONENT);
 }
 
@@ -409,7 +408,6 @@ ratelimitModInit(void)
 	CHKiRet(objGetObjInterface(&obj));
 	CHKiRet(objUse(glbl, CORE_COMPONENT));
 	CHKiRet(objUse(datetime, CORE_COMPONENT));
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(parser, CORE_COMPONENT));
 finalize_it:
 	RETiRet;

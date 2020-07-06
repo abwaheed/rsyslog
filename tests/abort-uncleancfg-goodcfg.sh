@@ -4,15 +4,24 @@
 echo ===============================================================================
 echo \[abort-uncleancfg-goodcfg.sh\]: testing abort on unclean configuration
 echo "testing a good Configuration verification run"
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup abort-uncleancfg-goodcfg.conf 
-. $srcdir/diag.sh tcpflood -m10 -i1 
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown
+. ${srcdir:=.}/diag.sh init
+generate_conf
+add_conf '
+$AbortOnUncleanConfig on
+$MainMsgQueueTimeoutShutdown 10000
 
-if [ ! -e rsyslog.out.log ]
+$template outfmt,"%msg:F,58:2%\n"
+template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to use relative path names!
+:msg, contains, "msgnum:" ?dynfile;outfmt
+'
+startup
+injectmsg 1 10
+shutdown_when_empty
+wait_shutdown
+
+if [ ! -e  $RSYSLOG_OUT_LOG ]
 then
         echo "error: expected file does not exist"
-	. $srcdir/diag.sh error-exit 1
+	error_exit 1
 fi
-. $srcdir/diag.sh exit
+exit_test

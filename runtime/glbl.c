@@ -7,7 +7,7 @@
  *
  * Module begun 2008-04-16 by Rainer Gerhards
  *
- * Copyright 2008-2018 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2020 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -31,6 +31,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -51,8 +52,15 @@
 #include "parserif.h"
 #include "rainerscript.h"
 #include "srUtils.h"
+#include "operatingstate.h"
 #include "net.h"
 #include "rsconf.h"
+#include "queue.h"
+#include "dnscache.h"
+
+#define REPORT_CHILD_PROCESS_EXITS_NONE 0
+#define REPORT_CHILD_PROCESS_EXITS_ERRORS 1
+#define REPORT_CHILD_PROCESS_EXITS_ALL 2
 
 /* some defaults */
 #ifndef DFLT_NETSTRM_DRVR
@@ -69,17 +77,21 @@ DEFobjCurrIf(net)
  * class...
  */
 int glblDebugOnShutdown = 0;	/* start debug log when we are shut down */
-#ifdef HAVE_LIBLOGGING_STDLOG
+#ifdef ENABLE_LIBLOGGING_STDLOG
 stdlog_channel_t stdlog_hdl = NULL;	/* handle to be used for stdlog */
 #endif
 
 static struct cnfobj *mainqCnfObj = NULL;/* main queue object, to be used later in startup sequence */
+#ifndef DFLT_INT_MSGS_SEV_FILTER
+	#define DFLT_INT_MSGS_SEV_FILTER 6	/* Warning level and more important */
+#endif
+int glblIntMsgsSeverityFilter = DFLT_INT_MSGS_SEV_FILTER;/* filter for logging internal messages by syslog sev. */
 int bProcessInternalMessages = 0;	/* Should rsyslog itself process internal messages?
 					 * 1 - yes
 					 * 0 - send them to libstdlog (e.g. to push to journal) or syslog()
 					 */
 static uchar *pszWorkDir = NULL;
-#ifdef HAVE_LIBLOGGING_STDLOG
+#ifdef ENABLE_LIBLOGGING_STDLOG
 static uchar *stdlog_chanspec = NULL;
 #endif
 static int bParseHOSTNAMEandTAG = 1;	/* parser modification (based on startup params!) */
@@ -88,7 +100,8 @@ static int iMaxLine = 8096;		/* maximum length of a syslog message */
 static uchar * oversizeMsgErrorFile = NULL;		/* File where oversize messages are written to */
 static int oversizeMsgInputMode = 0;	/* Mode which oversize messages will be forwarded */
 static int reportOversizeMsg = 1;	/* shall error messages be generated for oversize messages? */
-static int iGnuTLSLoglevel = 0;
+static int reportChildProcessExits = REPORT_CHILD_PROCESS_EXITS_ERRORS;
+static int iGnuTLSLoglevel = 0;		/* Sets GNUTLS Debug Level */
 static int iDefPFFamily = PF_UNSPEC;     /* protocol family (IPv4, IPv6 or both) */
 static int bDropMalPTRMsgs = 0;/* Drop messages which have malicious PTR records during DNS lookup */
 static int option_DisallowWarning = 1;	/* complain if message from disallowed sender is received */
@@ -109,7 +122,7 @@ static uchar *pszDfltNetstrmDrvr = NULL; /* module name of default netstream dri
 static uchar *pszDfltNetstrmDrvrCAF = NULL; /* default CA file for the netstrm driver */
 static uchar *pszDfltNetstrmDrvrKeyFile = NULL; /* default key file for the netstrm driver (server) */
 static uchar *pszDfltNetstrmDrvrCertFile = NULL; /* default cert file for the netstrm driver (server) */
-static int bTerminateInputs = 0;		/* global switch that inputs shall terminate ASAP (1=> terminate) */
+int bTerminateInputs = 0;		/* global switch that inputs shall terminate ASAP (1=> terminate) */
 static uchar cCCEscapeChar = '#'; /* character to be used to start an escape sequence for control chars */
 static int bDropTrailingLF = 1; /* drop trailing LF's on reception? */
 static int bEscapeCCOnRcv = 1; /* escape control characters on reception: 0 - no, 1 - yes */
@@ -130,12 +143,15 @@ char** glblDbgFiles = NULL;
 size_t glblDbgFilesNum = 0;
 int glblDbgWhitelist = 1;
 int glblPermitCtlC = 0;
+int glblInputTimeoutShutdown = 1000; /* input shutdown timeout in ms */
+int glblShutdownQueueDoubleSize = 0;
+static const uchar * operatingStateFile = NULL;
 
 uint64_t glblDevOptions = 0; /* to be used by developers only */
 
 pid_t glbl_ourpid;
 #ifndef HAVE_ATOMIC_BUILTINS
-static DEF_ATOMIC_HELPER_MUT(mutTerminateInputs);
+DEF_ATOMIC_HELPER_MUT(mutTerminateInputs);
 #endif
 #ifdef USE_UNLIMITED_SELECT
 static int iFdSetSize = howmany(FD_SETSIZE, __NFDBITS) * sizeof (fd_mask); /* size of select() bitmask in bytes */
@@ -148,6 +164,7 @@ static int ntzinfos;
 /* tables for interfacing with the v6 config system */
 static struct cnfparamdescr cnfparamdescr[] = {
 	{ "workdirectory", eCmdHdlrString, 0 },
+	{ "operatingstatefile", eCmdHdlrString, 0 },
 	{ "dropmsgswithmaliciousdnsptrrecords", eCmdHdlrBinary, 0 },
 	{ "localhostname", eCmdHdlrGetWord, 0 },
 	{ "preservefqdn", eCmdHdlrBinary, 0 },
@@ -157,12 +174,13 @@ static struct cnfparamdescr cnfparamdescr[] = {
 	{ "debug.unloadmodules", eCmdHdlrBinary, 0 },
 	{ "defaultnetstreamdrivercafile", eCmdHdlrString, 0 },
 	{ "defaultnetstreamdriverkeyfile", eCmdHdlrString, 0 },
-        { "defaultnetstreamdrivercertfile", eCmdHdlrString, 0 },
+	{ "defaultnetstreamdrivercertfile", eCmdHdlrString, 0 },
 	{ "defaultnetstreamdriver", eCmdHdlrString, 0 },
 	{ "maxmessagesize", eCmdHdlrSize, 0 },
 	{ "oversizemsg.errorfile", eCmdHdlrGetWord, 0 },
 	{ "oversizemsg.report", eCmdHdlrBinary, 0 },
 	{ "oversizemsg.input.mode", eCmdHdlrGetWord, 0 },
+	{ "reportchildprocessexits", eCmdHdlrGetWord, 0 },
 	{ "action.reportsuspension", eCmdHdlrBinary, 0 },
 	{ "action.reportsuspensioncontinuation", eCmdHdlrBinary, 0 },
 	{ "parser.controlcharacterescapeprefix", eCmdHdlrGetChar, 0 },
@@ -180,21 +198,36 @@ static struct cnfparamdescr cnfparamdescr[] = {
 	{ "senders.reportgoneaway", eCmdHdlrBinary, 0 },
 	{ "senders.timeoutafter", eCmdHdlrPositiveInt, 0 },
 	{ "senders.keeptrack", eCmdHdlrBinary, 0 },
+	{ "inputs.timeout.shutdown", eCmdHdlrPositiveInt, 0 },
 	{ "privdrop.group.keepsupplemental", eCmdHdlrBinary, 0 },
 	{ "net.ipprotocol", eCmdHdlrGetWord, 0 },
 	{ "net.acladdhostnameonfail", eCmdHdlrBinary, 0 },
 	{ "net.aclresolvehostname", eCmdHdlrBinary, 0 },
 	{ "net.enabledns", eCmdHdlrBinary, 0 },
 	{ "net.permitACLwarning", eCmdHdlrBinary, 0 },
+	{ "abortonuncleanconfig", eCmdHdlrBinary, 0 },
 	{ "variables.casesensitive", eCmdHdlrBinary, 0 },
 	{ "environment", eCmdHdlrArray, 0 },
 	{ "processinternalmessages", eCmdHdlrBinary, 0 },
 	{ "umask", eCmdHdlrFileCreateMode, 0 },
+	{ "security.abortonidresolutionfail", eCmdHdlrBinary, 0 },
 	{ "internal.developeronly.options", eCmdHdlrInt, 0 },
 	{ "internalmsg.ratelimit.interval", eCmdHdlrPositiveInt, 0 },
 	{ "internalmsg.ratelimit.burst", eCmdHdlrPositiveInt, 0 },
+	{ "internalmsg.severity", eCmdHdlrSeverity, 0 },
 	{ "errormessagestostderr.maxnumber", eCmdHdlrPositiveInt, 0 },
 	{ "shutdown.enable.ctlc", eCmdHdlrBinary, 0 },
+	{ "default.action.queue.timeoutshutdown", eCmdHdlrInt, 0 },
+	{ "default.action.queue.timeoutactioncompletion", eCmdHdlrInt, 0 },
+	{ "default.action.queue.timeoutenqueue", eCmdHdlrInt, 0 },
+	{ "default.action.queue.timeoutworkerthreadshutdown", eCmdHdlrInt, 0 },
+	{ "default.ruleset.queue.timeoutshutdown", eCmdHdlrInt, 0 },
+	{ "default.ruleset.queue.timeoutactioncompletion", eCmdHdlrInt, 0 },
+	{ "default.ruleset.queue.timeoutenqueue", eCmdHdlrInt, 0 },
+	{ "default.ruleset.queue.timeoutworkerthreadshutdown", eCmdHdlrInt, 0 },
+	{ "reverselookup.cache.ttl.default", eCmdHdlrNonNegInt, 0 },
+	{ "reverselookup.cache.ttl.enable", eCmdHdlrBinary, 0 },
+	{ "shutdown.queue.doublesize", eCmdHdlrBinary, 0 },
 	{ "debug.files", eCmdHdlrArray, 0 },
 	{ "debug.whitelist", eCmdHdlrBinary, 0 }
 };
@@ -239,13 +272,13 @@ GetGnuTLSLoglevel(void)
  */
 #define SIMP_PROP(nameFunc, nameVar, dataType) \
 	SIMP_PROP_GET(nameFunc, nameVar, dataType) \
-	SIMP_PROP_SET(nameFunc, nameVar, dataType) 
+	SIMP_PROP_SET(nameFunc, nameVar, dataType)
 #define SIMP_PROP_SET(nameFunc, nameVar, dataType) \
 static rsRetVal Set##nameFunc(dataType newVal) \
 { \
 	nameVar = newVal; \
 	return RS_RET_OK; \
-} 
+}
 #define SIMP_PROP_GET(nameFunc, nameVar, dataType) \
 static dataType Get##nameFunc(void) \
 { \
@@ -301,7 +334,7 @@ static void SetGlobalInputTermination(void)
 
 /* set the local host IP address to a specific string. Helper to
  * small set of functions. No checks done, caller must ensure it is
- * ok to call. Most importantly, the IP address must not already have 
+ * ok to call. Most importantly, the IP address must not already have
  * been set. -- rgerhards, 2012-03-21
  */
 static rsRetVal
@@ -356,7 +389,7 @@ finalize_it:
 }
 
 
-/* This function is used to set the global work directory name. 
+/* This function is used to set the global work directory name.
  * It verifies that the provided directory actually exists and
  * emits an error message if not.
  * rgerhards, 2011-02-16
@@ -394,7 +427,7 @@ static rsRetVal setWorkDir(void __attribute__((unused)) *pVal, uchar *pNewVal)
 	}
 
 	if(!S_ISDIR(sb.st_mode)) {
-		LogError(0, RS_RET_ERR_WRKDIR, "$WorkDirectory: %s not a directory - directive ignored", 
+		LogError(0, RS_RET_ERR_WRKDIR, "$WorkDirectory: %s not a directory - directive ignored",
 				pNewVal);
 		ABORT_FINALIZE(RS_RET_ERR_WRKDIR);
 	}
@@ -469,6 +502,25 @@ setOversizeMsgInputMode(const uchar *const mode)
 	RETiRet;
 }
 
+static rsRetVal ATTR_NONNULL()
+setReportChildProcessExits(const uchar *const mode)
+{
+	DEFiRet;
+	if(!strcmp((char*)mode, "none")) {
+		reportChildProcessExits = REPORT_CHILD_PROCESS_EXITS_NONE;
+	} else if(!strcmp((char*)mode, "errors")) {
+		reportChildProcessExits = REPORT_CHILD_PROCESS_EXITS_ERRORS;
+	} else if(!strcmp((char*)mode, "all")) {
+		reportChildProcessExits = REPORT_CHILD_PROCESS_EXITS_ALL;
+	} else {
+		LogError(0, RS_RET_CONF_PARAM_INVLD,
+				"invalid value '%s' for global parameter reportChildProcessExits -- ignored",
+				mode);
+		iRet = RS_RET_CONF_PARAM_INVLD;
+	}
+	RETiRet;
+}
+
 static rsRetVal
 setDisableDNS(int val)
 {
@@ -539,14 +591,22 @@ GetLocalHostIP(void)
 
 
 /* set our local hostname. Free previous hostname, if it was already set.
- * Note that we do now do this in a thread
- * "once in a lifetime" action which can not be undone. -- gerhards, 2009-07-20
+ * Note that we do now do this in a thread. As such, the method here
+ * is NOT 100% clean. If we run into issues, we need to think about
+ * refactoring the whole way we handle the local host name processing.
+ * Possibly using a PROP might be the right solution then.
  */
 static rsRetVal
-SetLocalHostName(uchar *newname)
+SetLocalHostName(uchar *const newname)
 {
-	free(LocalHostName);
-	LocalHostName = newname;
+	uchar *toFree;
+	if(LocalHostName == NULL || strcmp((const char*)LocalHostName, (const char*) newname)) {
+		toFree = LocalHostName;
+		LocalHostName = newname;
+	} else {
+		toFree = newname;
+	}
+	free(toFree);
 	return RS_RET_OK;
 }
 
@@ -584,6 +644,11 @@ glblGetOversizeMsgErrorFile(void)
 	return oversizeMsgErrorFile;
 }
 
+const uchar*
+glblGetOperatingStateFile(void)
+{
+	return operatingStateFile;
+}
 
 /* return the mode with which oversize messages will be put forward
  */
@@ -598,6 +663,42 @@ glblReportOversizeMessage(void)
 {
 	return reportOversizeMsg;
 }
+
+
+/* logs a message indicating that a child process has terminated.
+ * If name != NULL, prints it as the program name.
+ */
+void
+glblReportChildProcessExit(const uchar *name, pid_t pid, int status)
+{
+	DBGPRINTF("waitpid for child %ld returned status: %2.2x\n", (long) pid, status);
+
+	if(reportChildProcessExits == REPORT_CHILD_PROCESS_EXITS_NONE
+		|| (reportChildProcessExits == REPORT_CHILD_PROCESS_EXITS_ERRORS
+			&& WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+		return;
+	}
+
+	if(WIFEXITED(status)) {
+		int severity = WEXITSTATUS(status) == 0 ? LOG_INFO : LOG_WARNING;
+		if(name != NULL) {
+			LogMsg(0, NO_ERRCODE, severity, "program '%s' (pid %ld) exited with status %d",
+					name, (long) pid, WEXITSTATUS(status));
+		} else {
+			LogMsg(0, NO_ERRCODE, severity, "child process (pid %ld) exited with status %d",
+					(long) pid, WEXITSTATUS(status));
+		}
+	} else if(WIFSIGNALED(status)) {
+		if(name != NULL) {
+			LogMsg(0, NO_ERRCODE, LOG_WARNING, "program '%s' (pid %ld) terminated by signal %d",
+					name, (long) pid, WTERMSIG(status));
+		} else {
+			LogMsg(0, NO_ERRCODE, LOG_WARNING, "child process (pid %ld) terminated by signal %d",
+					(long) pid, WTERMSIG(status));
+		}
+	}
+}
+
 
 /* set our local domain name. Free previous domain, if it was already set.
  */
@@ -697,7 +798,7 @@ SetLocalFQDNName(uchar *newname)
 	return RS_RET_OK;
 }
 
-/* return the current localhost name as FQDN (requires FQDN to be set) 
+/* return the current localhost name as FQDN (requires FQDN to be set)
  * TODO: we should set the FQDN ourselfs in here!
  */
 static uchar*
@@ -850,8 +951,11 @@ static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __a
 	free(oversizeMsgErrorFile);
 	oversizeMsgErrorFile = NULL;
 	oversizeMsgInputMode = glblOversizeMsgInputMode_Accept;
+	reportChildProcessExits = REPORT_CHILD_PROCESS_EXITS_ERRORS;
 	free(pszWorkDir);
 	pszWorkDir = NULL;
+	free((void*)operatingStateFile);
+	operatingStateFile = NULL;
 	bDropMalPTRMsgs = 0;
 	bPreserveFQDN = 0;
 	iMaxLine = 8192;
@@ -1018,7 +1122,7 @@ glblProcessTimezone(struct cnfobj *o)
 		parser_errmsg("timezone offset outside of supported range (hours 0..12, minutes 0..59)");
 		goto done;
 	}
-	
+
 	addTimezoneInfo(id, offsMode, offsHour, offsMin);
 
 done:
@@ -1058,9 +1162,9 @@ glblProcessCnf(struct cnfobj *o)
 		if(!strcmp(paramblk.descr[i].name, "processinternalmessages")) {
 			bProcessInternalMessages = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "internal.developeronly.options")) {
-		        glblDevOptions = (uint64_t) cnfparamvals[i].val.d.n;
+			glblDevOptions = (uint64_t) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "stdlog.channelspec")) {
-#ifndef HAVE_LIBLOGGING_STDLOG
+#ifndef ENABLE_LIBLOGGING_STDLOG
 			LogError(0, RS_RET_ERR, "rsyslog wasn't "
 				"compiled with liblogging-stdlog support. "
 				"The 'stdlog.channelspec' parameter "
@@ -1073,6 +1177,15 @@ glblProcessCnf(struct cnfobj *o)
 			stdlog_hdl = stdlog_open("rsyslogd", 0, STDLOG_SYSLOG,
 					(char*) stdlog_chanspec);
 #endif
+		} else if(!strcmp(paramblk.descr[i].name, "operatingstatefile")) {
+			if(operatingStateFile != NULL) {
+				LogError(errno, RS_RET_PARAM_ERROR,
+					"error: operatingStateFile already set to '%s' - "
+					"new valule ignored", operatingStateFile);
+			} else {
+				operatingStateFile = (uchar*) es_str2cstr(cnfparamvals[i].val.d.estr, NULL);
+				osf_open();
+			}
 		}
 	}
 done:	return;
@@ -1258,6 +1371,10 @@ glblDoneLoadCnf(void)
 			const char *const tmp = es_str2cstr(cnfparamvals[i].val.d.estr, NULL);
 			setOversizeMsgInputMode((uchar*) tmp);
 			free((void*)tmp);
+		} else if(!strcmp(paramblk.descr[i].name, "reportchildprocessexits")) {
+			const char *const tmp = es_str2cstr(cnfparamvals[i].val.d.estr, NULL);
+			setReportChildProcessExits((uchar*) tmp);
+			free((void*)tmp);
 		} else if(!strcmp(paramblk.descr[i].name, "debug.onshutdown")) {
 			glblDebugOnShutdown = (int) cnfparamvals[i].val.d.n;
 			LogError(0, RS_RET_OK, "debug: onShutdown set to %d", glblDebugOnShutdown);
@@ -1315,36 +1432,47 @@ glblDoneLoadCnf(void)
 			}
 			free(proto);
 		} else if(!strcmp(paramblk.descr[i].name, "senders.reportnew")) {
-		        glblReportNewSenders = (int) cnfparamvals[i].val.d.n;
+			glblReportNewSenders = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "senders.reportgoneaway")) {
-		        glblReportGoneAwaySenders = (int) cnfparamvals[i].val.d.n;
+			glblReportGoneAwaySenders = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "senders.timeoutafter")) {
-		        glblSenderStatsTimeout = (int) cnfparamvals[i].val.d.n;
+			glblSenderStatsTimeout = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "senders.keeptrack")) {
-		        glblSenderKeepTrack = (int) cnfparamvals[i].val.d.n;
+			glblSenderKeepTrack = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "inputs.timeout.shutdown")) {
+			glblInputTimeoutShutdown = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "privdrop.group.keepsupplemental")) {
-		        loadConf->globals.gidDropPrivKeepSupplemental = (int) cnfparamvals[i].val.d.n;
+			loadConf->globals.gidDropPrivKeepSupplemental = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "security.abortonidresolutionfail")) {
+			loadConf->globals.abortOnIDResolutionFail = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "net.acladdhostnameonfail")) {
-		        *(net.pACLAddHostnameOnFail) = (int) cnfparamvals[i].val.d.n;
+			*(net.pACLAddHostnameOnFail) = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "net.aclresolvehostname")) {
-		        *(net.pACLDontResolve) = !((int) cnfparamvals[i].val.d.n);
+			*(net.pACLDontResolve) = !((int) cnfparamvals[i].val.d.n);
 		} else if(!strcmp(paramblk.descr[i].name, "net.enabledns")) {
-		        setDisableDNS(!((int) cnfparamvals[i].val.d.n));
+			setDisableDNS(!((int) cnfparamvals[i].val.d.n));
 		} else if(!strcmp(paramblk.descr[i].name, "net.permitwarning")) {
-		        setOption_DisallowWarning(!((int) cnfparamvals[i].val.d.n));
+			setOption_DisallowWarning(!((int) cnfparamvals[i].val.d.n));
+		} else if(!strcmp(paramblk.descr[i].name, "abortonuncleanconfig")) {
+			loadConf->globals.bAbortOnUncleanConfig = cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "internalmsg.ratelimit.burst")) {
-		        glblIntMsgRateLimitBurst = (int) cnfparamvals[i].val.d.n;
+			glblIntMsgRateLimitBurst = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "internalmsg.ratelimit.interval")) {
-		       glblIntMsgRateLimitItv = (int) cnfparamvals[i].val.d.n;
+			glblIntMsgRateLimitItv = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "internalmsg.severity")) {
+			glblIntMsgsSeverityFilter = (int) cnfparamvals[i].val.d.n;
+			if((glblIntMsgsSeverityFilter < 0) || (glblIntMsgsSeverityFilter > 7)) {
+				parser_errmsg("invalid internalmsg.severity value");
+				glblIntMsgsSeverityFilter = DFLT_INT_MSGS_SEV_FILTER;
+			}
 		} else if(!strcmp(paramblk.descr[i].name, "environment")) {
 			for(int j = 0 ; j <  cnfparamvals[i].val.d.ar->nmemb ; ++j) {
-				char *const var =
-					es_str2cstr(cnfparamvals[i].val.d.ar->arr[j], NULL);
+				char *const var = es_str2cstr(cnfparamvals[i].val.d.ar->arr[j], NULL);
 				do_setenv(var);
 				free(var);
 			}
 		} else if(!strcmp(paramblk.descr[i].name, "errormessagestostderr.maxnumber")) {
-		        loadConf->globals.maxErrMsgToStderr = (int) cnfparamvals[i].val.d.n;
+			loadConf->globals.maxErrMsgToStderr = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "debug.files")) {
 			free(glblDbgFiles); /* "fix" Coverity false positive */
 			glblDbgFilesNum = cnfparamvals[i].val.d.ar->nmemb;
@@ -1354,14 +1482,36 @@ glblDoneLoadCnf(void)
 			}
 			qsort(glblDbgFiles, glblDbgFilesNum, sizeof(char*), qs_arrcmp_glblDbgFiles);
 		} else if(!strcmp(paramblk.descr[i].name, "debug.whitelist")) {
-		        glblDbgWhitelist = (int) cnfparamvals[i].val.d.n;
+			glblDbgWhitelist = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "shutdown.queue.doublesize")) {
+			glblShutdownQueueDoubleSize = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "umask")) {
-		        loadConf->globals.umask = (int) cnfparamvals[i].val.d.n;
+			loadConf->globals.umask = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "shutdown.enable.ctlc")) {
-		        glblPermitCtlC = (int) cnfparamvals[i].val.d.n;
+			glblPermitCtlC = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.action.queue.timeoutshutdown")) {
+			actq_dflt_toQShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.action.queue.timeoutactioncompletion")) {
+			actq_dflt_toActShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.action.queue.timeoutenqueue")) {
+			actq_dflt_toEnq = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.action.queue.timeoutworkerthreadshutdown")) {
+			actq_dflt_toWrkShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.ruleset.queue.timeoutshutdown")) {
+			ruleset_dflt_toQShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.ruleset.queue.timeoutactioncompletion")) {
+			ruleset_dflt_toActShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.ruleset.queue.timeoutenqueue")) {
+			ruleset_dflt_toEnq = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "default.ruleset.queue.timeoutworkerthreadshutdown")) {
+			ruleset_dflt_toWrkShutdown = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "reverselookup.cache.ttl.default")) {
+			dnscacheDefaultTTL = cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "reverselookup.cache.ttl.enable")) {
+			dnscacheEnableTTL = cnfparamvals[i].val.d.n;
 		} else {
 			dbgprintf("glblDoneLoadCnf: program error, non-handled "
-			  "param '%s'\n", paramblk.descr[i].name);
+				"param '%s'\n", paramblk.descr[i].name);
 		}
 	}
 

@@ -1,7 +1,7 @@
 /* lmsig_ksi-ls12.c
  *
  * An implementation of the sigprov interface for KSI-LS12.
- * 
+ *
  * Copyright 2013-2017 Adiscon GmbH and Guardtime, Inc.
  *
  * This file is part of the rsyslog runtime library.
@@ -9,11 +9,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -44,8 +44,8 @@ DEFobjCurrIf(glbl)
 static struct cnfparamdescr cnfpdescr[] = {
 	{ "sig.hashfunction", eCmdHdlrGetWord, 0 },
 	{ "sig.aggregator.url", eCmdHdlrGetWord, CNFPARAM_REQUIRED},
-	{ "sig.aggregator.user", eCmdHdlrGetWord, CNFPARAM_REQUIRED},
-	{ "sig.aggregator.key", eCmdHdlrGetWord, CNFPARAM_REQUIRED},
+	{ "sig.aggregator.user", eCmdHdlrGetWord, 0},
+	{ "sig.aggregator.key", eCmdHdlrGetWord, 0},
 	{ "sig.aggregator.hmacAlg", eCmdHdlrGetWord, 0 },
 	{ "sig.block.levelLimit", eCmdHdlrSize, CNFPARAM_REQUIRED},
 	{ "sig.block.timeLimit", eCmdHdlrInt, 0},
@@ -54,7 +54,8 @@ static struct cnfparamdescr cnfpdescr[] = {
 	{ "sig.fileformat", eCmdHdlrString, 0},
 	{ "sig.syncmode", eCmdHdlrString, 0},
 	{ "sig.randomsource", eCmdHdlrString, 0},
-	{ "sig.debug", eCmdHdlrInt, 0},
+	{ "sig.debugfile", eCmdHdlrString, 0},
+	{ "sig.debuglevel", eCmdHdlrInt, 0},
 	{ "dirowner", eCmdHdlrUID, 0}, /* legacy: dirowner */
 	{ "dirownernum", eCmdHdlrInt, 0 }, /* legacy: dirownernum */
 	{ "dirgroup", eCmdHdlrGID, 0 }, /* legacy: dirgroup */
@@ -181,8 +182,12 @@ SetCnfParam(void *pT, struct nvlst *lst)
 			cstr = (uchar*) es_str2cstr(pvals[i].val.d.estr, NULL);
 			rsksiSetRandomSource(pThis->ctx, (char*) cstr);
 			free(cstr);
-		} else if (!strcmp(pblk.descr[i].name, "sig.debug")) {
-			rsksiSetDebug(pThis->ctx, pvals[i].val.d.n);
+		} else if (!strcmp(pblk.descr[i].name, "sig.debugfile")) {
+			cstr = (uchar*) es_str2cstr(pvals[i].val.d.estr, NULL);
+			rsksiSetDebugFile(pThis->ctx, (char*) cstr);
+			free(cstr);
+		} else if (!strcmp(pblk.descr[i].name, "sig.debuglevel")) {
+			rsksiSetDebugLevel(pThis->ctx, pvals[i].val.d.n);
 		} else if (!strcmp(pblk.descr[i].name, "dirowner")) {
 			rsksiSetDirUID(pThis->ctx, pvals[i].val.d.n);
 		} else if (!strcmp(pblk.descr[i].name, "dirownernum")) {
@@ -209,20 +214,24 @@ SetCnfParam(void *pT, struct nvlst *lst)
 		}
 	}
 
-	if(rsksiSetHashFunction(pThis->ctx, hash ? hash : (char*) "SHA2-256") != KSI_OK)
-		goto finalize_it;
+	if(rsksiSetHashFunction(pThis->ctx, hash ? hash : (char*) "default") != KSI_OK) {
+		ABORT_FINALIZE(RS_RET_KSI_ERR);
+	}
 
-	if(rsksiSetHmacFunction(pThis->ctx, hmac ? hmac : (char*) "SHA2-256") != KSI_OK)
-		goto finalize_it;
+	if(rsksiSetHmacFunction(pThis->ctx, hmac ? hmac : (char*) "default") != KSI_OK) {
+		ABORT_FINALIZE(RS_RET_KSI_ERR);
+	}
 
-	if(rsksiSetAggregator(pThis->ctx, ag_uri, ag_loginid, ag_key) != KSI_OK)
-		goto finalize_it;
+	if(rsksiSetAggregator(pThis->ctx, ag_uri, ag_loginid, ag_key) != KSI_OK) {
+		ABORT_FINALIZE(RS_RET_KSI_ERR);
+	}
 
 finalize_it:
 	free(ag_uri);
 	free(ag_loginid);
 	free(ag_key);
 	free(hash);
+	free(hmac);
 
 	if(pvals != NULL)
 		cnfparamvalsDestruct(pvals, &pblk);
@@ -244,7 +253,7 @@ OnFileOpen(void *pT, uchar *fn, void *pGF) {
 /* Note: we assume that the record is terminated by a \n.
  * As of the GuardTime paper, \n is not part of the signed
  * message, so we subtract one from the record size. This
- * may cause issues with non-standard formats, but let's 
+ * may cause issues with non-standard formats, but let's
  * see how things evolve (the verifier will not work in
  * any case when the records are not \n delimited...).
  * rgerhards, 2013-03-17

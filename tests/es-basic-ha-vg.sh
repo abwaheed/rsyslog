@@ -1,17 +1,29 @@
 #!/bin/bash
 # This file is part of the rsyslog project, released under ASL 2.0
-echo ===============================================================================
-echo \[es-basic-ha.sh\]: basic test for elasticsearch high availability functionality
-. $srcdir/diag.sh init
-. $srcdir/diag.sh es-init
-. $srcdir/diag.sh startup-vg es-basic-ha.conf
-. $srcdir/diag.sh injectmsg  0 100
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh wait-for-stats-flush 'rsyslog.out.stats.log'
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown-vg
-. $srcdir/diag.sh es-getdata 100
-. $srcdir/diag.sh seq-check  0 99
-# The configuration makes every other request from message #3 fail checkConn (N/2-1)
-. $srcdir/diag.sh custom-content-check '"failed.checkConn": 49' 'rsyslog.out.stats.log'
-. $srcdir/diag.sh exit
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=100
+export ES_DOWNLOAD=elasticsearch-6.0.0.tar.gz
+export ES_PORT=19200
+ensure_elasticsearch_ready
+
+init_elasticsearch
+generate_conf
+add_conf '
+template(name="tpl" type="string"
+	 string="{\"msgnum\":\"%msg:F,58:2%\"}")
+
+module(load="../plugins/omelasticsearch/.libs/omelasticsearch")
+:msg, contains, "msgnum:" action(type="omelasticsearch"
+				 template="tpl"
+				 serverport=`echo $ES_PORT`
+				 searchIndex="rsyslog_testbench"
+				 bulkmode="on")
+'
+startup_vg
+injectmsg
+wait_queueempty
+shutdown_when_empty
+wait_shutdown_vg
+es_getdata $NUMMESSAGES $ES_PORT
+seq_check
+exit_test

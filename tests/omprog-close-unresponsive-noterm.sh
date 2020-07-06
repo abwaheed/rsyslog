@@ -4,17 +4,39 @@
 # This test checks that omprog does NOT send a TERM signal to the
 # external program when signalOnClose=off, closes the pipe, and kills
 # the unresponsive child if killUnresponsive=on.
+. ${srcdir:=.}/diag.sh init
+generate_conf
+add_conf '
+module(load="../plugins/omprog/.libs/omprog")
 
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup omprog-close-unresponsive-noterm.conf
-. $srcdir/diag.sh wait-startup
-. $srcdir/diag.sh injectmsg 0 10
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown
-. $srcdir/diag.sh ensure-no-process-exists omprog-close-unresponsive-bin.sh
+template(name="outfmt" type="string" string="%msg%\n")
 
-expected_output="Starting
+main_queue(
+    queue.timeoutShutdown="60000"  # give time to omprog to wait for the child
+)
+
+:msg, contains, "msgnum:" {
+    action(
+        type="omprog"
+        binary="'$RSYSLOG_DYNNAME.'omprog-close-unresponsive-bin.sh"
+        template="outfmt"
+        name="omprog_action"
+        queue.type="Direct"  # the default; facilitates sync with the child process
+        confirmMessages="on"  # facilitates sync with the child process
+        signalOnClose="off"
+        closeTimeout="1000"  # ms
+        killUnresponsive="on"  # default value: the value of signalOnClose
+    )
+}
+'
+cp -f $srcdir/testsuites/omprog-close-unresponsive-bin.sh $RSYSLOG_DYNNAME.omprog-close-unresponsive-bin.sh
+startup
+injectmsg 0 10
+shutdown_when_empty
+wait_shutdown
+. $srcdir/diag.sh ensure-no-process-exists $RSYSLOG_DYNNAME.omprog-close-unresponsive-bin.sh
+
+export EXPECTED="Starting
 Received msgnum:00000000:
 Received msgnum:00000001:
 Received msgnum:00000002:
@@ -26,12 +48,6 @@ Received msgnum:00000007:
 Received msgnum:00000008:
 Received msgnum:00000009:
 Terminating unresponsively"
+cmp_exact $RSYSLOG_OUT_LOG
 
-written_output=$(<rsyslog.out.log)
-if [[ "$expected_output" != "$written_output" ]]; then
-    echo unexpected omprog script output:
-    echo "$written_output"
-    . $srcdir/diag.sh error-exit 1
-fi
-
-. $srcdir/diag.sh exit
+exit_test

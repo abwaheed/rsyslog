@@ -1,14 +1,22 @@
 #!/bin/bash
+# test imptcp with large connection count
 # test many concurrent tcp connections
-echo ====================================================================================
-echo TEST: \[manyptcp.sh\]: test imptcp with large connection count
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup manyptcp.conf
-# the config file specifies exactly 1100 connections
-. $srcdir/diag.sh tcpflood -c1000 -m40000
-# the sleep below is needed to prevent too-early termination of the tcp listener
-sleep 1
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown	# we need to wait until rsyslogd is finished!
-. $srcdir/diag.sh seq-check 0 39999
-. $srcdir/diag.sh exit
+# released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=40000
+export QUEUE_EMPTY_CHECK_FUNC=wait_file_lines
+generate_conf
+add_conf '
+$MaxOpenFiles 2000
+module(load="../plugins/imptcp/.libs/imptcp")
+input(type="imptcp" port="0" listenPortFileName="'$RSYSLOG_DYNNAME'.tcpflood_port")
+
+template(name="outfmt" type="string" string="%msg:F,58:2%\n")
+:msg, contains, "msgnum:" action(type="omfile" file="'$RSYSLOG_OUT_LOG'" template="outfmt")
+'
+startup
+tcpflood -c1000 -m$NUMMESSAGES
+shutdown_when_empty
+wait_shutdown
+seq_check
+exit_test

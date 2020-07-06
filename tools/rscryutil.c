@@ -1,17 +1,17 @@
 /* This is a tool for processing rsyslog encrypted log files.
- * 
- * Copyright 2013-2016 Adiscon GmbH
+ *
+ * Copyright 2013-2019 Adiscon GmbH
  *
  * This file is part of rsyslog.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either exprs or implied.
@@ -88,14 +88,14 @@ eiGetRecord(FILE *eifp, char *rectype, char *value)
 	for(i = 0 ; i < EIF_MAX_RECTYPE_LEN && buf[i] != ':' ; ++i)
 		if(buf[i] == '\0') {
 			r = 2; goto done;
-		} else 
+		} else
 			rectype[i] = buf[i];
 	rectype[i] = '\0';
 	j = 0;
 	for(++i ; i < EIF_MAX_VALUE_LEN && buf[i] != '\n' ; ++i, ++j)
 		if(buf[i] == '\0') {
 			r = 3; goto done;
-		} else 
+		} else
 			value[j] = buf[i];
 	value[j] = '\0';
 	r = 0;
@@ -182,7 +182,7 @@ done:	return r;
 static int
 initCrypt(FILE *eifp)
 {
- 	int r = 0;
+	int r = 0;
 	gcry_error_t gcryError;
 	char iv[4096];
 
@@ -195,6 +195,7 @@ initCrypt(FILE *eifp)
 	if((r = eiGetIV(eifp, iv, blkLength)) != 0) goto done;
 
 	size_t keyLength = gcry_cipher_get_algo_keylen(cry_algo);
+	assert(cry_key != NULL); /* "fix" clang 10 static analyzer false positive */
 	if(strlen(cry_key) != keyLength) {
 		fprintf(stderr, "invalid key length; key is %u characters, but "
 			"exactly %llu characters are required\n", cry_keylen,
@@ -296,21 +297,21 @@ doDecrypt(FILE *logfp, FILE *eifp, FILE *outfp)
 	off64_t currOffs = 0;
 	int r = 1;
 	int fd;
-        struct stat buf;
+	struct stat buf;
 
 	while(1) {
 		/* process block */
 		if(initCrypt(eifp) != 0)
 			goto done;
 		/* set blkEnd to size of logfp and proceed. */
-                if((fd = fileno(logfp)) == -1) {
-                        r = -1;
-                        goto done;
-                }
-                if((r = fstat(fd, &buf)) != 0) goto done;
-                blkEnd = buf.st_size;
-                r = eiGetEND(eifp, &blkEnd);
-                if(r != 0 && r != 1) goto done;
+		if((fd = fileno(logfp)) == -1) {
+			r = -1;
+			goto done;
+		}
+		if((r = fstat(fd, &buf)) != 0) goto done;
+		blkEnd = buf.st_size;
+		r = eiGetEND(eifp, &blkEnd);
+		if(r != 0 && r != 1) goto done;
 		decryptBlock(logfp, outfp, blkEnd, &currOffs);
 		gcry_cipher_close(gcry_chd);
 	}
@@ -433,8 +434,8 @@ setKey(void)
 	}
 }
 
-static struct option long_options[] = 
-{ 
+static struct option long_options[] =
+{
 	{"verbose", no_argument, NULL, 'v'},
 	{"version", no_argument, NULL, 'V'},
 	{"decrypt", no_argument, NULL, 'd'},
@@ -446,8 +447,8 @@ static struct option long_options[] =
 	{"key-program", required_argument, NULL, 'p'},
 	{"algo", required_argument, NULL, 'a'},
 	{"mode", required_argument, NULL, 'm'},
-	{NULL, 0, NULL, 0} 
-}; 
+	{NULL, 0, NULL, 0}
+};
 
 int
 main(int argc, char *argv[])
@@ -526,6 +527,7 @@ main(int argc, char *argv[])
 	}
 
 	setKey();
+	assert(cry_key != NULL);
 
 	if(mode == MD_WRITE_KEYFILE) {
 		if(optind != argc) {
@@ -543,6 +545,7 @@ main(int argc, char *argv[])
 		}
 	}
 
+	assert(cry_key != NULL);
 	memset(cry_key, 0, cry_keylen); /* zero-out key store */
 	cry_keylen = 0;
 	return 0;

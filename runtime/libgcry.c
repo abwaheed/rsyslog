@@ -1,6 +1,6 @@
 /* gcry.c - rsyslog's libgcrypt based crypto provider
  *
- * Copyright 2013-2017 Adiscon GmbH.
+ * Copyright 2013-2018 Adiscon GmbH.
  *
  * We need to store some additional information in support of encryption.
  * For this, we create a side-file, which is named like the actual log
@@ -13,7 +13,7 @@
  *            encryption block ends.
  * For the current implementation, there must always be an IV record
  * followed by an END record. Each records is LF-terminated. Record
- * types can simply be extended in the future by specifying new 
+ * types can simply be extended in the future by specifying new
  * types (like "IV") before the colon.
  * To identify a file as rsyslog encryption info file, it must start with
  * the line "FILETYPE:rsyslog-enrcyption-info"
@@ -285,7 +285,8 @@ eiGetEND(gcryfile gf, off64_t *offs)
 	DEFiRet;
 
 	CHKiRet(eiGetRecord(gf, rectype, value));
-	if(strcmp(rectype, "END")) {
+	const char *const const_END = "END"; // clang static analyzer work-around
+	if(strcmp(rectype, const_END)) {
 		DBGPRINTF("no END record found when expected, record type "
 			  "seen is '%s'\n", rectype);
 		ABORT_FINALIZE(RS_RET_ERR);
@@ -462,6 +463,7 @@ void
 rsgcryCtxDel(gcryctx ctx)
 {
 	if(ctx != NULL) {
+		free(ctx->key);
 		free(ctx);
 	}
 }
@@ -479,17 +481,18 @@ addPadding(gcryfile pF, uchar *buf, size_t *plen)
 	(*plen)+= nPad;
 }
 
-static void
-removePadding(uchar *buf, size_t *plen)
+static void ATTR_NONNULL()
+removePadding(uchar *const buf, size_t *const plen)
 {
-	unsigned len = (unsigned) *plen;
-	unsigned iSrc, iDst;
-	uchar *frstNUL;
+	const size_t len = *plen;
+	size_t iSrc, iDst;
 
-	frstNUL = (uchar*)strchr((char*)buf, 0x00);
-	if(frstNUL == NULL)
-		goto done;
-	iDst = iSrc = frstNUL - buf;
+	iSrc = 0;
+	/* skip to first NUL */
+	while(iSrc < len && buf[iSrc] == '\0') {
+		++iSrc;
+	}
+	iDst = iSrc;
 
 	while(iSrc < len) {
 		if(buf[iSrc] != 0x00)
@@ -498,7 +501,6 @@ removePadding(uchar *buf, size_t *plen)
 	}
 
 	*plen = iDst;
-done:	return;
 }
 
 /* returns 0 on succes, positive if key length does not match and key
@@ -555,7 +557,13 @@ finalize_it:
 /* We use random numbers to initiate the IV. Rsyslog runtime will ensure
  * we get a sufficiently large number.
  */
+#if defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunknown-attributes"
+#endif
 static rsRetVal
+#if defined(__clang__)
+__attribute__((no_sanitize("shift"))) /* IV shift causes known overflow */
+#endif
 seedIV(gcryfile gf, uchar **iv)
 {
 	long rndnum = 0; /* keep compiler happy -- this value is always overriden */
@@ -619,7 +627,7 @@ readBlkEnd(gcryfile gf)
 	} else {
 		FINALIZE;
 	}
-		
+
 finalize_it:
 	RETiRet;
 }

@@ -3,7 +3,7 @@
  * Note: we currently do not have an input module spec, but
  * we will have one in the future. This module needs then to be
  * adapted.
- * 
+ *
  * File begun on 2007-08-03 by RGerhards
  *
  * Copyright 2007-2017 Rainer Gerhards and Adiscon GmbH.
@@ -13,11 +13,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -93,7 +93,6 @@ rsRetVal iminternalAddMsg(smsg_t *pMsg)
 	#else
 	r = pthread_mutex_trylock(&mutList); // must check
 	#endif
-	is_locked = 1;
 	if(r != 0) {
 		dbgprintf("iminternalAddMsg: timedlock for mutex failed with %d, msg %s\n",
 			r, getMSG(pMsg));
@@ -101,11 +100,12 @@ rsRetVal iminternalAddMsg(smsg_t *pMsg)
 		msgDestruct(&pMsg);
 		ABORT_FINALIZE(RS_RET_ERR);
 	}
+	is_locked = 1;
 	CHKiRet(iminternalConstruct(&pThis));
 	pThis->pMsg = pMsg;
 	CHKiRet(llAppend(&llMsgs,  NULL, (void*) pThis));
 
-	if(bHaveMainQueue) {
+	if(PREFER_FETCH_32BIT(bHaveMainQueue)) {
 		DBGPRINTF("signaling new internal message via SIGTTOU: '%s'\n",
 			pThis->pMsg->pszRawMsg);
 		kill(glblGetOurPid(), SIGTTOU);
@@ -149,18 +149,6 @@ rsRetVal iminternalRemoveMsg(smsg_t **ppMsg)
 finalize_it:
 	pthread_mutex_unlock(&mutList);
 	RETiRet;
-}
-
-/* tell the caller if we have any messages ready for processing.
- * 0 means we have none, everything else means there is at least
- * one message ready.
- */
-rsRetVal iminternalHaveMsgReady(int* pbHaveOne)
-{
-	pthread_mutex_lock(&mutList);
-	const rsRetVal iRet = llGetNumElts(&llMsgs, pbHaveOne);
-	pthread_mutex_unlock(&mutList);
-	return iRet;
 }
 
 

@@ -7,11 +7,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -46,6 +46,7 @@ struct tcpLstnPortList_s {
 	ratelimit_t *ratelimiter;
 	uchar dfltTZ[8];		/**< default TZ if none in timestamp; '\0' =No Default */
 	sbool bSPFramingFix;	/**< support work-around for broken Cisco ASA framing? */
+	const uchar *pszLstnPortFileName;	/**< File in which the dynamic port is written */
 	STATSCOUNTER_DEF(ctrSubmit, mutCtrSubmit)
 	tcpLstnPortList_t *pNext;	/**< next port or NULL */
 };
@@ -61,8 +62,13 @@ struct tcpsrv_s {
 	int iKeepAliveTime;	/**< socket layer KEEPALIVE timeout */
 	netstrms_t *pNS;	/**< pointer to network stream subsystem */
 	int iDrvrMode;		/**< mode of the stream driver to use */
+	int DrvrChkExtendedKeyUsage;		/**< if true, verify extended key usage in certs */
+	int DrvrPrioritizeSan;		/**< if true, perform stricter checking of names in certs */
+	int DrvrTlsVerifyDepth;		/**< Verify Depth for certificate chains */
 	uchar *gnutlsPriorityString;	/**< priority string for gnutls */
+	uchar *pszLstnPortFileName;	/**< File in which the dynamic port is written */
 	uchar *pszDrvrAuthMode;	/**< auth mode of the stream driver to use */
+	uchar *pszDrvrPermitExpiredCerts;/**< current driver setting for handlign expired certs */
 	uchar *pszDrvrName;	/**< name of stream driver to use */
 	uchar *pszInputName;	/**< value to be used as input name */
 	uchar *pszOrigin;		/**< module to be used as "origin" (e.g. for pstats) */
@@ -85,8 +91,9 @@ struct tcpsrv_s {
 	int maxFrameSize;	/**< max frame size for octet counted*/
 	int bDisableLFDelim;	/**< if 1, standard LF frame delimiter is disabled (*very dangerous*) */
 	int discardTruncatedMsg;/**< discard msg part that has been truncated*/
-	int ratelimitInterval;
-	int ratelimitBurst;
+	sbool bPreserveCase;	/**< preserve case in fromhost */
+	unsigned int ratelimitInterval;
+	unsigned int ratelimitBurst;
 	tcps_sess_t **pSessions;/**< array of all of our sessions */
 	void *pUsr;		/**< a user-settable pointer (provides extensibility for "derived classes")*/
 	/* callbacks */
@@ -123,7 +130,8 @@ BEGINinterface(tcpsrv) /* name must also be changed in ENDinterface macro! */
 	rsRetVal (*Construct)(tcpsrv_t **ppThis);
 	rsRetVal (*ConstructFinalize)(tcpsrv_t __attribute__((unused)) *pThis);
 	rsRetVal (*Destruct)(tcpsrv_t **ppThis);
-	rsRetVal (*configureTCPListen)(tcpsrv_t*, uchar *pszPort, int bSuppOctetFram, uchar *pszAddr);
+	rsRetVal (*ATTR_NONNULL(1,2) configureTCPListen)(tcpsrv_t*,
+		const uchar *pszPort, int bSuppOctetFram, const uchar *pszAddr, const uchar *);
 	rsRetVal (*create_tcp_socket)(tcpsrv_t *pThis);
 	rsRetVal (*Run)(tcpsrv_t *pThis);
 	/* set methods */
@@ -140,6 +148,7 @@ BEGINinterface(tcpsrv) /* name must also be changed in ENDinterface macro! */
 	rsRetVal (*SetCBOnErrClose)(tcpsrv_t*, rsRetVal (*) (tcps_sess_t*));
 	rsRetVal (*SetDrvrMode)(tcpsrv_t *pThis, int iMode);
 	rsRetVal (*SetDrvrAuthMode)(tcpsrv_t *pThis, uchar *pszMode);
+	rsRetVal (*SetDrvrPermitExpiredCerts)(tcpsrv_t *pThis, uchar *pszMode);
 	rsRetVal (*SetDrvrPermPeers)(tcpsrv_t *pThis, permittedPeers_t*);
 	/* session specifics */
 	rsRetVal (*SetCBOnSessAccept)(tcpsrv_t*, rsRetVal (*) (tcpsrv_t*, tcps_sess_t*));
@@ -162,7 +171,7 @@ BEGINinterface(tcpsrv) /* name must also be changed in ENDinterface macro! */
 	/* added v11 -- rgerhards, 2011-05-09 */
 	rsRetVal (*SetKeepAlive)(tcpsrv_t*, int);
 	/* added v13 -- rgerhards, 2012-10-15 */
-	rsRetVal (*SetLinuxLikeRatelimiters)(tcpsrv_t *pThis, int interval, int burst);
+	rsRetVal (*SetLinuxLikeRatelimiters)(tcpsrv_t *pThis, unsigned int interval, unsigned int burst);
 	/* added v14 -- rgerhards, 2013-07-28 */
 	rsRetVal (*SetDfltTZ)(tcpsrv_t *pThis, uchar *dfltTZ);
 	/* added v15 -- rgerhards, 2013-09-17 */
@@ -177,8 +186,17 @@ BEGINinterface(tcpsrv) /* name must also be changed in ENDinterface macro! */
 	rsRetVal (*SetbSPFramingFix)(tcpsrv_t*, sbool);
 	/* added v19 -- PascalWithopf, 2017-08-08 */
 	rsRetVal (*SetGnutlsPriorityString)(tcpsrv_t*, uchar*);
+	/* added v21 -- Preserve case in fromhost, 2018-08-16 */
+	rsRetVal (*SetPreserveCase)(tcpsrv_t *pThis, int bPreserveCase);
+	/* added v22 -- File for dynamic Port, 2018-08-29 */
+	rsRetVal (*SetLstnPortFileName)(tcpsrv_t*, uchar*);
+	/* added v23 -- Options for stricter driver behavior, 2019-08-16 */
+	rsRetVal (*SetDrvrCheckExtendedKeyUsage)(tcpsrv_t *pThis, int ChkExtendedKeyUsage);
+	rsRetVal (*SetDrvrPrioritizeSAN)(tcpsrv_t *pThis, int prioritizeSan);
+	/* added v24 -- Options for TLS verify depth driver behavior, 2019-12-20 */
+	rsRetVal (*SetDrvrTlsVerifyDepth)(tcpsrv_t *pThis, int verifyDepth);
 ENDinterface(tcpsrv)
-#define tcpsrvCURR_IF_VERSION 20 /* increment whenever you change the interface structure! */
+#define tcpsrvCURR_IF_VERSION 24 /* increment whenever you change the interface structure! */
 /* change for v4:
  * - SetAddtlFrameDelim() added -- rgerhards, 2008-12-10
  * - SetInputName() added -- rgerhards, 2008-12-10

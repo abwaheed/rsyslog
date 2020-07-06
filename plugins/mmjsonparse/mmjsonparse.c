@@ -13,11 +13,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,7 +25,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -36,6 +35,8 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <json.h>
+
+#include "rsyslog.h"
 #include "conf.h"
 #include "syslogd-types.h"
 #include "template.h"
@@ -52,7 +53,6 @@ MODULE_CNFNAME("mmjsonparse")
 static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __attribute__((unused)) *pVal);
 
 /* static data */
-DEFobjCurrIf(errmsg);
 
 /* internal structures
  */
@@ -128,7 +128,7 @@ BEGINcreateWrkrInstance
 CODESTARTcreateWrkrInstance
 	pWrkrData->tokener = json_tokener_new();
 	if(pWrkrData->tokener == NULL) {
-		errmsg.LogError(0, RS_RET_ERR, "error: could not create json "
+		LogError(0, RS_RET_ERR, "error: could not create json "
 				"tokener, cannot activate instance");
 		ABORT_FINALIZE(RS_RET_ERR);
 	}
@@ -205,8 +205,8 @@ processJSON(wrkrInstanceData_t *pWrkrData, smsg_t *pMsg, char *buf, size_t lenBu
 		}
 		ABORT_FINALIZE(RS_RET_NO_CEE_MSG);
 	}
- 
- 	msgAddJSON(pMsg, pWrkrData->pData->container, json, 0, 0);
+
+	msgAddJSON(pMsg, pWrkrData->pData->container, json, 0, 0);
 finalize_it:
 	RETiRet;
 }
@@ -343,7 +343,6 @@ ENDparseSelectorAct
 
 BEGINmodExit
 CODESTARTmodExit
-	objRelease(errmsg, CORE_COMPONENT);
 ENDmodExit
 
 
@@ -395,7 +394,6 @@ CODEmodInit_QueryRegCFSLineHdlr
 		ABORT_FINALIZE(RS_RET_NO_MSG_PASSING);
 	}
 
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	
 	CHKiRet(omsdRegCFSLineHdlr((uchar *)"resetconfigvariables", 1, eCmdHdlrCustomHandler,
 				    resetConfigVariables, NULL, STD_LOADABLE_MODULE_ID));

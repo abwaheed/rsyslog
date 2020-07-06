@@ -1,3 +1,4 @@
+#!/bin/bash
 # this script runs the travis CI testbench. It's easier and more
 # powerful this way than using .travis.yml (plus recommended by travis support)
 #
@@ -33,9 +34,14 @@ if [ "$MERGE" == "YES" ]; then
     set -e
 fi
 
+if [ "$IMDOCKER" == "YES" ]; then
+	export IMDOCKER_OPT="--enable-imdocker --enable-imdocker-tests"
+fi
+
 set -e
 if [ "$CC" == "clang" ] && [ "$DISTRIB_CODENAME" == "trusty" ]; then SCAN_BUILD="scan-build-5.0"; CC=clang-5.0; else SCAN_BUILD="scan-build"; fi
 
+set +e
 ls -l *.tar.gz
 rm -f *.tar.gz # safety check: we must not have tarballs at this stage
 if [ "x$BUILD_FROM_TARBALL" == "xYES" ]; then
@@ -49,19 +55,79 @@ if [ "x$BUILD_FROM_TARBALL" == "xYES" ]; then
 	tar xzf ../rsyslog.tar.gz
 	ls -ld rsyslog*
 	cd rsyslog*
+	export JOURNAL_OPT=
+	export IMDOCKER_OPT=
+	export DEFAULT_CONFIG_FLAGS="--disable-fmhttp"
+	echo "============================== DONE unpacking =============================="
+else
+	if [ "$MINIMAL_BUILD" == "YES" ]; then
+		export DEFAULT_CONFIG_FLAGS="
+		--disable-ommongodb
+		"
+	else
+		export DEFAULT_CONFIG_FLAGS="
+		--enable-imfile \
+		--enable-impstats \
+		--enable-mmrm1stspace \
+		--enable-imptcp \
+		--enable-mmanon \
+		--enable-mmaudit \
+		--enable-mmfields \
+		--enable-mmjsonparse \
+		--enable-mmpstrucdata \
+		--enable-mmsequence \
+		--enable-mmutf8fix \
+		--enable-mail \
+		--enable-omprog \
+		--enable-omruleset \
+		--enable-omuxsock \
+		--enable-pmaixforwardedfrom \
+		--enable-pmciscoios \
+		--enable-pmcisconames \
+		--enable-pmlastmsg \
+		--enable-pmsnare \
+		--enable-libgcrypt \
+		--enable-mmnormalize \
+		--enable-omudpspoof \
+		--enable-relp --enable-omrelp-default-port=13515 \
+		--enable-snmp \
+		--enable-mmsnmptrapd \
+		--enable-gnutls \
+		--enable-openssl \
+		--enable-libdbi \
+		--enable-omhttpfs \
+		--enable-elasticsearch \
+		--enable-omhttp \
+		--enable-ommongodb \
+		--enable-omtcl \
+		--enable-mmdblookup \
+		--enable-mmcount \
+		--enable-gssapi-krb5 \
+		--enable-omhiredis \
+		--enable-usertools \
+		--enable-pmnull \
+		--enable-pmnormalize \
+		--enable-pgsql --enable-pgsql-tests \
+		--enable-mysql --enable-mysql-tests \
+		"
+	fi
 fi
 pwd
+set -e
 autoreconf --force --verbose --install
 if [ "x$GROK" == "xYES" ]; then export GROK="--enable-mmgrok"; fi
-if [ "x$ESTEST" == "xYES" ]; then export ES_TEST_CONFIGURE_OPT="--enable-elasticsearch-tests" ; fi
+if [ "x$ESTEST" == "xYES" ]; then export ES_TEST_CONFIGURE_OPT="--enable-elasticsearch-tests=minimal" ; fi
 # at this point, the environment should be setup for ./configure
 if [ "$CC" == "clang" ] && [ "$DISTRIB_CODENAME" == "trusty" ]; then export CC="clang-3.6"; fi
 $CC -v
 
-if [ "$DISTRIB_CODENAME" != "precise" ]; then AMQP1="--enable-omamqp1"; fi
+echo EXTRA_CONFIGURE: $EXTRA_CONFIGURE
+
+if [ "$DISTRIB_CODENAME" == "trusty" ]; then AMQP1="--enable-omamqp1"; fi
 export CONFIG_FLAGS="$CONFIGURE_FLAGS \
 	$EXTRA_CONFIGURE \
 	$JOURNAL_OPT \
+	$IMDOCKER_OPT \
 	$HIREDIS_OPT \
 	$ENABLE_KAFKA \
 	$ENABLE_DEBUGLESS \
@@ -69,57 +135,23 @@ export CONFIG_FLAGS="$CONFIGURE_FLAGS \
 	$GROK \
 	$ES_TEST_CONFIGURE_OPT \
 	$AMQP1 \
+	$DEFAULT_CONFIG_FLAGS \
 	--disable-generate-man-pages \
-	--enable-testbench \
-	--enable-imdiag \
-	--enable-imfile \
-	--enable-impstats \
-	--enable-mmrm1stspace \
-	--enable-imptcp \
-	--enable-mmanon \
-	--enable-mmaudit \
-	--enable-mmfields \
-	--enable-mmjsonparse \
-	--enable-mmpstrucdata \
-	--enable-mmsequence \
-	--enable-mmutf8fix \
-	--enable-mail \
-	--enable-omprog \
-	--enable-omruleset \
-	--enable-omstdout \
-	--enable-omuxsock \
-	--enable-pmaixforwardedfrom \
-	--enable-pmciscoios \
-	--enable-pmcisconames \
-	--enable-pmlastmsg \
-	--enable-pmsnare \
-	--enable-libgcrypt \
-	--enable-mmnormalize \
-	--enable-omudpspoof \
-	--enable-relp --enable-omrelp-default-port=13515 \
-	--enable-snmp \
-	--enable-mmsnmptrapd \
-	--enable-gnutls \
-	--enable-mysql --enable-mysql-tests \
-	--enable-gt-ksi \
-	--enable-libdbi \
-	--enable-pgsql --enable-pgsql-tests \
-	--enable-omhttpfs \
-	--enable-elasticsearch \
 	--enable-valgrind \
-	--enable-ommongodb \
-	--enable-omtcl \
-	--enable-mmdblookup \
-	--enable-mmcount \
-	--enable-gssapi-krb5 \
-	--enable-omhiredis \
-	--enable-imczmq --enable-omczmq \
-	--enable-usertools \
-	--enable-pmnull \
-	--enable-pmnormalize"
+	--enable-testbench \
+	--enable-omstdout \
+	--enable-imdiag"
+
+echo CONFIG_FLAGS: $CONFIG_FLAGS
+
+echo "============================== flags set =============================="
+env | grep CONFIG
+echo "============================== flags end =============================="
 # Note: [io]mzmq3 cannot be built any longer, according to Brian Knox they require an
 # outdated version of the client lib. So we do not bother any longer about them.
+set -xv
 ./configure  $CONFIG_FLAGS
+set +xv
 export USE_AUTO_DEBUG="off" # set to "on" to enable this for travis
 make -j
 
@@ -127,7 +159,7 @@ if [ "x$CHECK" == "xYES" ]
 then
     set +e  # begin testbench, here we do not want to abort
     devtools/prep-mysql-db.sh  # prepare mysql for testbench
-    make check
+    make -j2 check
     ALL_OK=$?
     if [ -f tests/test-suite.log ]
     then
@@ -139,8 +171,9 @@ then
         exit $ALL_OK
     fi
     set -e # now errors are no longer permited, again
-    make distcheck
+    echo now running \"make distcheck\"
+    #make distcheck
 fi
 
-if [ "x$STAT_AN" == "xYES" ] ; then make clean; CFLAGS="-O2"; ./configure $CONFIG_FLAGS ; fi
+if [ "x$STAT_AN" == "xYES" ] ; then make clean; export CFLAGS="-O2"; ./configure $CONFIG_FLAGS ; fi
 if [ "x$STAT_AN" == "xYES" ] ; then $SCAN_BUILD --use-cc $CC --status-bugs make -j ; fi

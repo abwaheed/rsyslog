@@ -4,38 +4,39 @@
 # Triggering condition: "json" property (message variables) are present
 # and "structured-data" property is also present. Caused rsyslog to
 # thrash the queue file, getting messages stuck in it and loosing all
-# after the initial problem occurence.
+# after the initial problem occurrence.
 # add 2017-02-08 by Rainer Gerhards, released under ASL 2.0
 
 uname
-if [ `uname` = "SunOS" ] ; then
+if [ $(uname) = "SunOS" ] ; then
    echo "This test currently does not work on all flavors of Solaris."
    exit 77
 fi
 
-. $srcdir/diag.sh init
-. $srcdir/diag.sh generate-conf
-. $srcdir/diag.sh add-conf '
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=10
+generate_conf
+add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514" ruleset="rs")
+input(type="imtcp" port="0" listenPortFileName="'$RSYSLOG_DYNNAME'.tcpflood_port" ruleset="rs")
 
 
 template(name="outfmt" type="string" string="%msg:F,58:2%\n")
 
 ruleset(name="rs2" queue.type="disk" queue.filename="rs2_q"
-	queue.spoolDirectory="test-spool") {
+	queue.spoolDirectory="'${RSYSLOG_DYNNAME}'.spool") {
 	set $!tmp=$msg;
-	action(type="omfile" file="rsyslog.out.log" template="outfmt")
+	action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt")
 }
 ruleset(name="rs") {
 	set $!tmp=$msg;
 	call rs2
 }
 '
-. $srcdir/diag.sh startup
-. $srcdir/diag.sh tcpflood -m1000 -y
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown
-. $srcdir/diag.sh seq-check 0 999
+startup
+tcpflood -m$NUMMESSAGES -y
+shutdown_when_empty
+wait_shutdown
+seq_check
 
-. $srcdir/diag.sh exit
+exit_test

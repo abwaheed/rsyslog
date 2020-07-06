@@ -7,11 +7,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -49,6 +49,25 @@ typedef enum LOGSIG_SyncMode_en {
 	LOGSIG_SYNCHRONOUS = 0x01
 } LOGSIG_SyncMode;
 
+enum {
+	/* Signer state assigned before the signer thread is initialized. State remains
+	 * until thread initialization begins. In case of system failure to create new
+	 * thread state remains the same.
+	 */
+	SIGNER_IDLE = 0x01,
+
+	/* Signer state assigned while signer thread initialization is in progress.
+	 */
+	SIGNER_INIT = 0x02,
+
+	/* Signer state assigned when signer thread is initialized and ready to work.
+	 */
+	SIGNER_STARTED = 0x04,
+
+	/* Thread state assigned when signer thread is being closed (signer thread returns).
+	 */
+	SIGNER_STOPPED = 0x08
+};
 
 /* Max number of roots inside the forest. This permits blocks of up to
  * 2^MAX_ROOTS records. We assume that 64 is sufficient for all use
@@ -73,6 +92,7 @@ struct rsksictx_s {
 	uint8_t bKeepTreeHashes;
 	uint64_t blockLevelLimit;
 	uint32_t blockTimeLimit;
+	uint32_t effectiveBlockLevelLimit; /* level limit adjusted by gateway settings */
 	uint8_t syncMode;
 	uid_t	fileUID;	/* IDs for creation */
 	uid_t	dirUID;
@@ -83,14 +103,22 @@ struct rsksictx_s {
 	char* aggregatorUri;
 	char* aggregatorId;
 	char* aggregatorKey;
+	char* aggregatorEndpoints[KSI_CTX_HA_MAX_SUBSERVICES];
+	int aggregatorEndpointCount;
 	char* random_source;
 	pthread_mutex_t module_lock;
 	pthread_t signer_thread;
 	ProtectedQueue *signer_queue;
-	bool thread_started;
-	uint8_t disabled; /* permits to disable the plugin --> set to 1 */
-	ksifile ksi;
-	bool debug;
+	int signer_state;
+	uint8_t disabled;	/* permits to disable the plugin --> set to 1 */
+
+	ksifile *ksi;		/* List of signature files for keeping track of block timeouts. */
+	size_t ksiCapacity;
+	size_t ksiCount;
+
+	char *debugFileName;
+	int debugLevel;
+	FILE *debugFile;
 	uint64_t max_requests;
 	void (*errFunc)(void *, unsigned char*);
 	void (*logFunc)(void *, unsigned char*);
@@ -125,6 +153,7 @@ struct ksifile_s {
 	KSI_DataHash *roots[MAX_ROOTS];
 	/* data members for the associated TLV file */
 	FILE *blockFile;
+	FILE *sigFile;	/* Note that this may only be closed by signer thread or when signer thread has terminated. */
 	rsksictx ctx;
 };
 
@@ -147,7 +176,7 @@ struct rsksistatefile {
 #define RSGTE_LEN 5	/* error related to length records */
 #define RSGTE_SIG_EXTEND 6/* error extending signature */
 #define RSGTE_INVLD_RECCNT 7/* mismatch between actual records and records
-                               given in block-sig record */
+				given in block-sig record */
 #define RSGTE_INVLHDR 8/* invalid file header */
 #define RSGTE_EOF 9 	/* specific EOF */
 #define RSGTE_MISS_REC_HASH 10 /* record hash missing when expected */
@@ -170,7 +199,7 @@ struct rsksistatefile {
 #define RSGTE_INTERNAL 27 /* Internal error */
 
 #define getIVLenKSI(bh) (hashOutputLengthOctetsKSI((bh)->hashID))
-#define rsksiSetBlockLevelLimit(ctx, limit) ((ctx)->blockLevelLimit = limit)
+#define rsksiSetBlockLevelLimit(ctx, limit) ((ctx)->blockLevelLimit = (ctx)->effectiveBlockLevelLimit = limit)
 #define rsksiSetBlockTimeLimit(ctx, limit) ((ctx)->blockTimeLimit = limit)
 #define rsksiSetKeepRecordHashes(ctx, val) ((ctx)->bKeepRecordHashes = val)
 #define rsksiSetKeepTreeHashes(ctx, val) ((ctx)->bKeepTreeHashes = val)
@@ -183,8 +212,10 @@ struct rsksistatefile {
 #define rsksiSetDirGID(ctx, val) ((ctx)->dirGID = val)
 #define rsksiSetCreateMode(ctx, val) ((ctx)->fCreateMode= val)
 #define rsksiSetDirCreateMode(ctx, val) ((ctx)->fDirCreateMode = val)
-#define rsksiSetDebug(ctx, val) ((ctx)->debug = val)
+#define rsksiSetDebugLevel(ctx, val) ((ctx)->debugLevel = val)
 
+
+int rsksiSetDebugFile(rsksictx ctx, char *val);
 int rsksiSetAggregator(rsksictx ctx, char *uri, char *loginid, char *key);
 int rsksiSetHashFunction(rsksictx ctx, char *algName);
 int rsksiSetHmacFunction(rsksictx ctx, char *algName);

@@ -2,19 +2,33 @@
 # Test imtcp/TLS with many dropping connections
 # added 2011-06-09 by Rgerhards
 #
-# This file is part of the rsyslog project, released  under GPLv3
-echo ====================================================================================
-echo TEST: \[imtcp_conndrop_tls.sh\]: test imtcp/tls with random connection drops
-. $srcdir/diag.sh init
-echo \$DefaultNetstreamDriverCAFile $srcdir/tls-certs/ca.pem     >rsyslog.conf.tlscert
-echo \$DefaultNetstreamDriverCertFile $srcdir/tls-certs/cert.pem >>rsyslog.conf.tlscert
-echo \$DefaultNetstreamDriverKeyFile $srcdir/tls-certs/key.pem   >>rsyslog.conf.tlscert
-. $srcdir/diag.sh startup imtcp_conndrop_tls.conf
+# This file is part of the rsyslog project, released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=50000
+export QUEUE_EMPTY_CHECK_FUNC=wait_seq_check
+generate_conf
+add_conf '
+global(	maxMessageSize="10k"
+	defaultNetstreamDriverCAFile="'$srcdir'/tls-certs/ca.pem"
+	defaultNetstreamDriverCertFile="'$srcdir'/tls-certs/cert.pem"
+	defaultNetstreamDriverKeyFile="'$srcdir'/tls-certs/key.pem"
+	defaultNetstreamDriver="gtls"
+	debug.whitelist="on"
+	debug.files=["nsd_ossl.c", "tcpsrv.c", "nsdsel_ossl.c", "nsdpoll_ptcp.c", "dnscache.c"]
+)
+
+module(load="../plugins/imtcp/.libs/imtcp" maxSessions="1100"
+       streamDriver.mode="1" streamDriver.authMode="anon")
+input(type="imtcp" port="0" listenPortFileName="'$RSYSLOG_DYNNAME'.tcpflood_port")
+
+template(name="outfmt" type="string" string="%msg:F,58:2%,%msg:F,58:3%,%msg:F,58:4%\n")
+local0.* action(type="omfile" file="'$RSYSLOG_OUT_LOG'" template="outfmt")
+'
+startup
 # 100 byte messages to gain more practical data use
-. $srcdir/diag.sh tcpflood -c20 -p13514 -m50000 -r -d100 -P129 -D -l0.995 -Ttls -Z$srcdir/tls-certs/cert.pem -z$srcdir/tls-certs/key.pem
-sleep 5 # due to large messages, we need this time for the tcp receiver to settle...
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown       # and wait for it to terminate
-. $srcdir/diag.sh seq-check 0 49999 -E
-# . $srcdir/diag.sh content-check 'XXXXX'	# Not really a check if it worked, but in TLS stuff in unfished TLS Packets gets lost, so we can't use seq-check.
-. $srcdir/diag.sh exit
+tcpflood -c20 -p$TCPFLOOD_PORT -m$NUMMESSAGES -r -d100 -P129 -D -l0.995 -Ttls -x$srcdir/tls-certs/ca.pem -Z$srcdir/tls-certs/cert.pem -z$srcdir/tls-certs/key.pem
+shutdown_when_empty
+wait_shutdown
+export SEQ_CHECK_OPTIONS=-E
+seq_check
+exit_test

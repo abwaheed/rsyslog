@@ -3,7 +3,7 @@
  *
  * File begun on 2007-07-30 by RGerhards
  *
- * Copyright (C) 2007-2016 Adiscon GmbH.
+ * Copyright (C) 2007-2020 Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -12,11 +12,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,7 +25,6 @@
  */
 #include "config.h"
 
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -35,12 +34,15 @@
 #include <pwd.h>
 #include <grp.h>
 
+#include "rsyslog.h"
 #include "cfsysline.h"
 #include "obj.h"
 #include "conf.h"
 #include "errmsg.h"
 #include "srUtils.h"
 #include "unicode-helper.h"
+#include "rsconf.h"
+#include "parserif.h"
 
 
 /* static data */
@@ -113,7 +115,7 @@ static rsRetVal parseIntVal(uchar **pp, int64 *pVal)
 {
 	DEFiRet;
 	uchar *p;
-	int64 i;	
+	int64 i;
 	int bWasNegative;
 
 	assert(pp != NULL);
@@ -184,13 +186,13 @@ static rsRetVal doGetSize(uchar **pp, rsRetVal (*pSetHdlr)(void*, int64), void *
 		case 'e': i *= (int64) 1024 * 1024 * 1024 * 1024 * 1024 * 1024; ++(*pp); break; /* exa */
 		/* and now the "new" 1000-based definitions */
 		case 'K': i *= 1000; ++(*pp); break;
-	        case 'M': i *= 1000000; ++(*pp); break;
-                case 'G': i *= 1000000000; ++(*pp); break;
+		case 'M': i *= 1000000; ++(*pp); break;
+		case 'G': i *= 1000000000; ++(*pp); break;
 			  /* we need to use the multiplication below because otherwise
 			   * the compiler gets an error during constant parsing */
-                case 'T': i *= (int64) 1000       * 1000000000; ++(*pp); break; /* tera */
-                case 'P': i *= (int64) 1000000    * 1000000000; ++(*pp); break; /* peta */
-                case 'E': i *= (int64) 1000000000 * 1000000000; ++(*pp); break; /* exa */
+		case 'T': i *= (int64) 1000       * 1000000000; ++(*pp); break; /* tera */
+		case 'P': i *= (int64) 1000000    * 1000000000; ++(*pp); break; /* peta */
+		case 'E': i *= (int64) 1000000000 * 1000000000; ++(*pp); break; /* exa */
 	}
 
 	/* done */
@@ -214,7 +216,7 @@ static rsRetVal doGetInt(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t), void *p
 {
 	uchar *p;
 	DEFiRet;
-	int64 i;	
+	int64 i;
 
 	assert(pp != NULL);
 	assert(*pp != NULL);
@@ -222,7 +224,7 @@ static rsRetVal doGetInt(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t), void *p
 	CHKiRet(doGetSize(pp, NULL,&i));
 	p = *pp;
 	if(i > 2147483648ll) { /*2^31*/
-		LogError(0, RS_RET_INVALID_VALUE, 
+		LogError(0, RS_RET_INVALID_VALUE,
 		         "value %lld too large for integer argument.", i);
 		ABORT_FINALIZE(RS_RET_INVALID_VALUE);
 	}
@@ -258,7 +260,7 @@ static rsRetVal doFileCreateMode(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t),
 {
 	uchar *p;
 	DEFiRet;
-	int iVal;	
+	int iVal;
 
 	assert(pp != NULL);
 	assert(*pp != NULL);
@@ -351,8 +353,13 @@ static rsRetVal doGetGID(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t), void *p
 	assert(*pp != NULL);
 
 	if(getSubString(pp, (char*) szName, sizeof(szName), ' ')  != 0) {
-		LogError(0, RS_RET_NOT_FOUND, "could not extract group name");
-		ABORT_FINALIZE(RS_RET_NOT_FOUND);
+		if(loadConf->globals.abortOnIDResolutionFail) {
+			fprintf(stderr, "could not extract group name: %s\n", (char*)szName);
+			exit(1); /* good exit */
+		} else {
+			LogError(0, RS_RET_NOT_FOUND, "could not extract group name");
+			ABORT_FINALIZE(RS_RET_NOT_FOUND);
+		}
 	}
 
 	do {
@@ -373,6 +380,10 @@ static rsRetVal doGetGID(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t), void *p
 			LogError(0, RS_RET_NOT_FOUND, "ID for group '%s' could not be found", szName);
 		}
 		iRet = RS_RET_NOT_FOUND;
+		if(loadConf->globals.abortOnIDResolutionFail) {
+			fprintf(stderr, "ID for group '%s' could not be found or error\n", szName);
+			exit(1); /* good exit */
+		}
 	} else {
 		if(pSetHdlr == NULL) {
 			/* we should set value directly to var */
@@ -407,15 +418,25 @@ static rsRetVal doGetUID(uchar **pp, rsRetVal (*pSetHdlr)(void*, uid_t), void *p
 	assert(*pp != NULL);
 
 	if(getSubString(pp, (char*) szName, sizeof(szName), ' ')  != 0) {
-		LogError(0, RS_RET_NOT_FOUND, "could not extract user name");
-		ABORT_FINALIZE(RS_RET_NOT_FOUND);
+		if(loadConf->globals.abortOnIDResolutionFail) {
+			fprintf(stderr, "could not extract user name: %s\n", (char*)szName);
+			exit(1); /* good exit */
+		} else {
+			LogError(0, RS_RET_NOT_FOUND, "could not extract user name");
+			ABORT_FINALIZE(RS_RET_NOT_FOUND);
+		}
 	}
 
 	getpwnam_r((char*)szName, &pwBuf, stringBuf, sizeof(stringBuf), &ppwBuf);
 
 	if(ppwBuf == NULL) {
-		LogError(0, RS_RET_NOT_FOUND, "ID for user '%s' could not be found or error", (char*)szName);
-		iRet = RS_RET_NOT_FOUND;
+		if(loadConf->globals.abortOnIDResolutionFail) {
+			fprintf(stderr, "ID for user '%s' could not be found or error\n", (char*)szName);
+			exit(1); /* good exit */
+		} else {
+			LogError(0, RS_RET_NOT_FOUND, "ID for user '%s' could not be found or error", (char*)szName);
+			iRet = RS_RET_NOT_FOUND;
+		}
 	} else {
 		if(pSetHdlr == NULL) {
 			/* we should set value directly to var */
@@ -476,9 +497,9 @@ getWord(uchar **pp, cstr_t **ppStrB)
 	DEFiRet;
 	uchar *p;
 
-	ASSERT(pp != NULL);
-	ASSERT(*pp != NULL);
-	ASSERT(ppStrB != NULL);
+	assert(pp != NULL);
+	assert(*pp != NULL);
+	assert(ppStrB != NULL);
 
 	CHKiRet(cstrConstruct(ppStrB));
 
@@ -520,8 +541,8 @@ static rsRetVal doGetWord(uchar **pp, rsRetVal (*pSetHdlr)(void*, uchar*), void 
 	cstr_t *pStrB = NULL;
 	uchar *pNewVal;
 
-	ASSERT(pp != NULL);
-	ASSERT(*pp != NULL);
+	assert(pp != NULL);
+	assert(*pp != NULL);
 
 	CHKiRet(getWord(pp, &pStrB));
 	CHKiRet(cstrConvSzStrAndDestruct(&pStrB, &pNewVal, 0));
@@ -564,8 +585,8 @@ doSyslogName(uchar **pp, rsRetVal (*pSetHdlr)(void*, int),
 	cstr_t *pStrB;
 	int iNewVal;
 
-	ASSERT(pp != NULL);
-	ASSERT(*pp != NULL);
+	assert(pp != NULL);
+	assert(*pp != NULL);
 
 	CHKiRet(getWord(pp, &pStrB)); /* get word */
 	iNewVal = decodeSyslogName(cstrGetSzStrNoNULL(pStrB), pNameTable);
@@ -605,7 +626,7 @@ doGoneAway(__attribute__((unused)) uchar **pp,
 	   __attribute__((unused)) rsRetVal (*pSetHdlr)(void*, int),
 	   __attribute__((unused)) void *pVal)
 {
-	LogError(0, RS_RET_CMD_GONE_AWAY, "config directive is no longer supported -- ignored");
+	parser_warnmsg("config directive is no longer supported -- ignored");
 	return RS_RET_CMD_GONE_AWAY;
 }
 
@@ -629,7 +650,7 @@ doSeverity(uchar **pp, rsRetVal (*pSetHdlr)(void*, int), void *pVal)
  */
 static rsRetVal cslchDestruct(void *pThis)
 {
-	ASSERT(pThis != NULL);
+	assert(pThis != NULL);
 	free(pThis);
 	
 	return RS_RET_OK;
@@ -654,7 +675,7 @@ finalize_it:
 }
 
 /* destructor for linked list keys. As we do not use any dynamic memory,
- * we simply return. However, this entry point must be defined for the 
+ * we simply return. However, this entry point must be defined for the
  * linkedList class to make sure we have not forgotten a destructor.
  * rgerhards, 2007-11-21
  */
@@ -751,6 +772,7 @@ static rsRetVal cslchCallHdlr(cslCmdHdlr_t *pThis, uchar **ppConfLine)
 	case eCmdHdlrArray:
 	case eCmdHdlrQueueType:
 	default:
+		dbgprintf("error: command handler type %d not implemented in legacy system\n", pThis->eType);
 		iRet = RS_RET_NOT_IMPLEMENTED;
 		goto finalize_it;
 	}

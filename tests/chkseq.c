@@ -3,7 +3,7 @@
  * be set.
  *
  * Params
- * -f<filename> MUST be given!
+ * -f<filename> file to process, if not given stdin is processed.
  * -s<starting number> -e<ending number>
  * default for s is 0. -e should be given (else it is also 0)
  * -d may be specified, in which case duplicate messages are permitted.
@@ -18,7 +18,7 @@
  *
  * Part of the testbench for rsyslog.
  *
- * Copyright 2009-2016 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2009-2018 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -41,7 +41,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
+#if defined(_AIX)
+	#include  <unistd.h>
+#else
+	#include <getopt.h>
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -100,11 +104,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if(file == NULL) {
-		printf("file must be given!\n");
-		exit(1);
-	}
-
 	if(start > end) {
 		printf("start must be less than or equal end!\n");
 		exit(1);
@@ -115,14 +114,18 @@ int main(int argc, char *argv[])
 	}
 
 	/* read file */
-	fp = fopen(file, "r");
+	if(file == NULL) {
+		fp = stdin;
+	} else {
+		fp = fopen(file, "r");
+	}
 	if(fp == NULL) {
 		printf("error opening file '%s'\n", file);
 		perror(file);
 		exit(1);
 	}
 
-	for(i = start ; i < end+1 ; i += increment) {
+	for(i = start ; i <= end ; i += increment) {
 		if(bHaveExtraData) {
 			if(fgets(ioBuf, sizeof(ioBuf), fp) == NULL) {
 				scanfOK = 0;
@@ -161,7 +164,7 @@ int main(int argc, char *argv[])
 			++i;
 		}
 		if(val != i) {
-			if(val == i - 1 && dupsPermitted) {
+			if(val == i - increment && dupsPermitted) {
 				--i;
 				++nDups;
 			} else {
@@ -171,8 +174,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if(i - 1 != end) {
-		printf("only %d records in file, expected %d\n", i - 1, end);
+	if(i - increment != end) {
+		printf("lastrecord does not match. file: %d, expected %d\n", i - increment, end);
 		exit(1);
 	}
 

@@ -2,7 +2,7 @@
  *
  * Module begun 2011-07-01 by Rainer Gerhards
  *
- * Copyright 2011-2018 Rainer Gerhards and Others.
+ * Copyright 2011-2019 Rainer Gerhards and Others.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -56,9 +56,7 @@
 #include "unicode-helper.h"
 #include "errmsg.h"
 
-#if !defined(_AIX)
-#pragma GCC diagnostic ignored "-Wswitch-enum"
-#endif
+PRAGMA_INGORE_Wswitch_enum
 
 DEFobjCurrIf(obj)
 DEFobjCurrIf(regexp)
@@ -256,7 +254,7 @@ DecodePropFilter(uchar *pline, struct cnfstmt *stmt)
 	int iOffset; /* for compare operations */
 	DEFiRet;
 
-	ASSERT(pline != NULL);
+	assert(pline != NULL);
 
 	DBGPRINTF("Decoding property-based filter '%s'\n", pline);
 
@@ -701,6 +699,23 @@ nvlstFindNameCStr(struct nvlst *lst, const char *const __restrict__ name)
 	return lst;
 }
 
+/* check if the nvlst is disabled, and mark config.enabled directive
+ * as used if it is not. Returns 1 if block is disabled, 0 otherwise.
+ */
+int nvlstChkDisabled(struct nvlst *lst)
+{
+	struct nvlst *valnode;
+
+	if((valnode = nvlstFindNameCStr(lst, "config.enabled")) != NULL) {
+		if(es_strbufcmp(valnode->val.d.estr, (unsigned char*) "on", 2)) {
+			return 1;
+		} else {
+			valnode->bUsed = 1;
+		}
+	}
+	return 0;
+}
+
 
 /* check if there are duplicate names inside a nvlst and emit
  * an error message, if so.
@@ -775,12 +790,12 @@ doGetSize(struct nvlst *valnode, struct cnfparamdescr *param,
 		/* and now the "new" 1000-based definitions */
 		case 'K': n *= 1000; break;
 	        case 'M': n *= 1000000; break;
-                case 'G': n *= 1000000000; break;
+		case 'G': n *= 1000000000; break;
 			  /* we need to use the multiplication below because otherwise
 			   * the compiler gets an error during constant parsing */
-                case 'T': n *= (int64) 1000       * 1000000000; break; /* tera */
-                case 'P': n *= (int64) 1000000    * 1000000000; break; /* peta */
-                case 'E': n *= (int64) 1000000000 * 1000000000; break; /* exa */
+		case 'T': n *= (int64) 1000       * 1000000000; break; /* tera */
+		case 'P': n *= (int64) 1000000    * 1000000000; break; /* peta */
+		case 'E': n *= (int64) 1000000000 * 1000000000; break; /* exa */
 		default: --i; break; /* indicates error */
 		}
 	}
@@ -893,13 +908,27 @@ doGetGID(struct nvlst *valnode, struct cnfparamdescr *param,
 {
 	char *cstr;
 	int r;
-	struct group *resultBuf;
+	struct group *resultBuf = NULL;
 	struct group wrkBuf;
-	char stringBuf[2048]; /* 2048 has been proven to be large enough */
+	char *stringBuf = NULL;
+	size_t bufSize = 1024;
+	int e;
 
 	cstr = es_str2cstr(valnode->val.d.estr, NULL);
-	const int e = getgrnam_r(cstr, &wrkBuf, stringBuf,
-		sizeof(stringBuf), &resultBuf);
+	do {
+		char *p;
+
+		/* Increase bufsize and try again.*/
+		bufSize *= 2;
+		p = realloc(stringBuf, bufSize);
+		if(!p) {
+			e = ENOMEM;
+			break;
+		}
+		stringBuf = p;
+		e = getgrnam_r(cstr, &wrkBuf, stringBuf, bufSize, &resultBuf);
+	} while(!resultBuf && (e == ERANGE));
+
 	if(resultBuf == NULL) {
 		if(e != 0) {
 			LogError(e, RS_RET_ERR, "parameter '%s': error to "
@@ -915,6 +944,7 @@ doGetGID(struct nvlst *valnode, struct cnfparamdescr *param,
 		   param->name, (int) resultBuf->gr_gid, cstr);
 		r = 1;
 	}
+	free(stringBuf);
 	free(cstr);
 	return r;
 }
@@ -1158,7 +1188,7 @@ done:	return r;
  * it is the caller's duty to free it when no longer needed.
  * NULL is returned on error, otherwise a pointer to the vals array.
  */
-struct cnfparamvals*
+struct cnfparamvals* ATTR_NONNULL(2)
 nvlstGetParams(struct nvlst *lst, struct cnfparamblk *params,
 	       struct cnfparamvals *vals)
 {
@@ -1205,17 +1235,6 @@ nvlstGetParams(struct nvlst *lst, struct cnfparamblk *params,
 			continue;
 		}
 		if(!nvlstGetParam(valnode, param, vals + i)) {
-			bInError = 1;
-		}
-	}
-
-	/* now config-system parameters (currently a bit hackish, as we
-	 * only have one...). -- rgerhards, 2018-01-24
-	 */
-	if((valnode = nvlstFindNameCStr(lst, "config.enabled")) != NULL) {
-		if(es_strbufcmp(valnode->val.d.estr, (unsigned char*) "on", 2)) {
-			dbgprintf("config object disabled by configuration\n");
-			valnode->bUsed = 1;
 			bInError = 1;
 		}
 	}
@@ -1478,7 +1497,7 @@ static rsRetVal
 doExtractFieldByChar(uchar *str, uchar delim, const int matchnbr, uchar **resstr)
 {
 	int iCurrFld;
-    int allocLen;
+	int allocLen;
 	int iLen;
 	uchar *pBuf;
 	uchar *pFld;
@@ -1512,9 +1531,9 @@ doExtractFieldByChar(uchar *str, uchar delim, const int matchnbr, uchar **resstr
 		allocLen = iLen + 1;
 #		ifdef VALGRIND
 		allocLen += (3 - (iLen % 4));
-        	/*older versions of valgrind have a problem with strlen inspecting 4-bytes at a time*/
+		/*older versions of valgrind have a problem with strlen inspecting 4-bytes at a time*/
 #		endif
-		CHKmalloc(pBuf = MALLOC(allocLen));
+		CHKmalloc(pBuf = malloc(allocLen));
 		/* now copy */
 		memcpy(pBuf, pFld, iLen);
 		pBuf[iLen] = '\0'; /* terminate it */
@@ -1562,7 +1581,7 @@ doExtractFieldByStr(uchar *str, char *delim, const rs_size_t lenDelim, const int
 			iLen = pFldEnd - pFld;
 		}
 		/* we got our end pointer, now do the copy */
-		CHKmalloc(pBuf = MALLOC(iLen + 1));
+		CHKmalloc(pBuf = malloc(iLen + 1));
 		/* now copy */
 		memcpy(pBuf, pFld, iLen);
 		pBuf[iLen] = '\0'; /* terminate it */
@@ -1699,24 +1718,24 @@ doFunc_exec_template(struct cnffunc *__restrict__ const func,
 
 static es_str_t*
 doFuncReplace(struct svar *__restrict__ const operandVal, struct svar *__restrict__ const findVal,
-	struct svar *__restrict__ const replaceWithVal) {
-    int freeOperand, freeFind, freeReplacement;
-    es_str_t *str = var2String(operandVal, &freeOperand);
-    es_str_t *findStr = var2String(findVal, &freeFind);
-    es_str_t *replaceWithStr = var2String(replaceWithVal, &freeReplacement);
-    uchar *find = es_getBufAddr(findStr);
-    uchar *replaceWith = es_getBufAddr(replaceWithStr);
-    uint lfind = es_strlen(findStr);
-    uint lReplaceWith = es_strlen(replaceWithStr);
-    uint lSrc = es_strlen(str);
-    uint lDst = 0;
-    uchar* src_buff = es_getBufAddr(str);
-    uint i, j;
-    for(i = j = 0; i <= lSrc; i++, lDst++) {
-        if (j == lfind) {
-            lDst = lDst - lfind + lReplaceWith;
-            j = 0;
-        }
+		struct svar *__restrict__ const replaceWithVal) {
+	int freeOperand, freeFind, freeReplacement;
+	es_str_t *str = var2String(operandVal, &freeOperand);
+	es_str_t *findStr = var2String(findVal, &freeFind);
+	es_str_t *replaceWithStr = var2String(replaceWithVal, &freeReplacement);
+	uchar *find = es_getBufAddr(findStr);
+	uchar *replaceWith = es_getBufAddr(replaceWithStr);
+	uint lfind = es_strlen(findStr);
+	uint lReplaceWith = es_strlen(replaceWithStr);
+	uint lSrc = es_strlen(str);
+	uint lDst = 0;
+	uchar* src_buff = es_getBufAddr(str);
+	uint i, j;
+	for(i = j = 0; i <= lSrc; i++, lDst++) {
+		if (j == lfind) {
+			lDst = lDst - lfind + lReplaceWith;
+			j = 0;
+		}
 		if (i == lSrc) break;
 		if (src_buff[i] == find[j]) {
 			j++;
@@ -1725,16 +1744,16 @@ doFuncReplace(struct svar *__restrict__ const operandVal, struct svar *__restric
 			lDst -= (j - 1);
 			j = 0;
 		}
-    }
-    es_str_t *res = es_newStr(lDst);
-    unsigned char* dest = es_getBufAddr(res);
-    uint k, s;
-    for(i = j = s = 0; i <= lSrc; i++, s++) {
-        if (j == lfind) {
-            s -= j;
-            for (k = 0; k < lReplaceWith; k++, s++) dest[s] = replaceWith[k];
-            j = 0;
-        }
+	}
+	es_str_t *res = es_newStr(lDst);
+	unsigned char* dest = es_getBufAddr(res);
+	uint k, s;
+	for(i = j = s = 0; i <= lSrc; i++, s++) {
+		if (j == lfind) {
+		s -= j;
+		for (k = 0; k < lReplaceWith; k++, s++) dest[s] = replaceWith[k];
+			j = 0;
+		}
 		if (i == lSrc) break;
 		if (src_buff[i] == find[j]) {
 			j++;
@@ -1746,15 +1765,15 @@ doFuncReplace(struct svar *__restrict__ const operandVal, struct svar *__restric
 			}
 			dest[s] = src_buff[i];
 		}
-    }
-    if (j > 0) {
-        for (k = 1; k <= j; k++) dest[s - k] = src_buff[i - k];
-    }
-    res->lenStr = lDst;
-    if(freeOperand) es_deleteStr(str);
-    if(freeFind) es_deleteStr(findStr);
-    if(freeReplacement) es_deleteStr(replaceWithStr);
-    return res;
+	}
+	if (j > 0) {
+		for (k = 1; k <= j; k++) dest[s - k] = src_buff[i - k];
+	}
+	res->lenStr = lDst;
+	if(freeOperand) es_deleteStr(str);
+	if(freeFind) es_deleteStr(findStr);
+	if(freeReplacement) es_deleteStr(replaceWithStr);
+	return res;
 }
 
 
@@ -1772,6 +1791,7 @@ doFunc_parse_json(struct cnffunc *__restrict__ const func,
 	cnfexprEval(func->expr[1], &srcVal[1], usrptr, pWti);
 	char *jsontext = (char*) var2CString(&srcVal[0], &bMustFree);
 	char *container = (char*) var2CString(&srcVal[1], &bMustFree2);
+	struct json_object *json;
 
 	int retVal;
 	assert(jsontext != NULL);
@@ -1783,7 +1803,7 @@ doFunc_parse_json(struct cnffunc *__restrict__ const func,
 		retVal = 1;
 		goto finalize_it;
 	}
-	struct json_object *const json = json_tokener_parse_ex(tokener, jsontext, strlen(jsontext));
+	json = json_tokener_parse_ex(tokener, jsontext, strlen(jsontext));
 	if(json == NULL) {
 		retVal = RS_SCRIPT_EINVAL;
 	} else {
@@ -1818,6 +1838,7 @@ doFunct_RandomGen(struct cnffunc *__restrict__ const func,
 	int success = 0;
 	struct svar srcVal;
 	long long retVal;
+	long int x;
 
 	cnfexprEval(func->expr[0], &srcVal, usrptr, pWti);
 	long long max = var2Number(&srcVal, &success);
@@ -1832,7 +1853,7 @@ doFunct_RandomGen(struct cnffunc *__restrict__ const func,
 		retVal = 0;
 		goto done;
 	}
-	long int x = randomNumber();
+	x = labs(randomNumber());
 	if (max > MAX_RANDOM_NUMBER) {
 		DBGPRINTF("rainerscript: desired random-number range [0 - %lld] "
 			"is wider than supported limit of [0 - %d)\n",
@@ -3422,7 +3443,7 @@ initFunc_re_match(struct cnffunc *func)
 
 	if((localRet = objUse(regexp, LM_REGEXP_FILENAME)) == RS_RET_OK) {
 		int errcode;
-		if((errcode = regexp.regcomp(re, (char*) regex, REG_EXTENDED) != 0)) {
+		if((errcode = regexp.regcomp(re, (char*) regex, REG_EXTENDED)) != 0) {
 			char errbuff[512];
 			regexp.regerror(errcode, re, errbuff, sizeof(errbuff));
 			parser_errmsg("cannot compile regex '%s': %s", regex, errbuff);
@@ -3430,7 +3451,7 @@ initFunc_re_match(struct cnffunc *func)
 		}
 	} else { /* regexp object could not be loaded */
 		parser_errmsg("could not load regex support - regex ignored");
-		ABORT_FINALIZE(RS_RET_ERR);
+		ABORT_FINALIZE(localRet);
 	}
 
 finalize_it:
@@ -3554,6 +3575,7 @@ static struct scriptFunct functions[] = {
 	{"cstr", 1, 1, doFunct_CStr, NULL, NULL},
 	{"cnum", 1, 1, doFunct_CNum, NULL, NULL},
 	{"ip42num", 1, 1, doFunct_Ipv42num, NULL, NULL},
+	{"ipv42num", 1, 1, doFunct_Ipv42num, NULL, NULL},
 	{"re_match", 2, 2, doFunct_ReMatch, initFunc_re_match, regex_destruct},
 	{"re_extract", 5, 5, doFunc_re_extract, initFunc_re_match, regex_destruct},
 	{"field", 3, 3, doFunct_Field, NULL, NULL},
@@ -3785,6 +3807,7 @@ void
 cnfexprPrint(struct cnfexpr *expr, int indent)
 {
 	struct cnffunc *func;
+	char *fname;
 	int i;
 
 	switch(expr->nodetype) {
@@ -3885,7 +3908,7 @@ cnfexprPrint(struct cnfexpr *expr, int indent)
 		doIndent(indent);
 		func = (struct cnffunc*) expr;
 		cstrPrint("function '", func->fname);
-		char *fname = es_str2cstr(func->fname, NULL);
+		fname = es_str2cstr(func->fname, NULL);
 		dbgprintf("' (name:%s, params:%hu)\n", fname, func->nParams);
 		free(fname);
 		if(func->fPtr == doFunct_Prifilt) {
@@ -4031,7 +4054,6 @@ void
 cnfstmtPrint(struct cnfstmt *root, int indent)
 {
 	struct cnfstmt *stmt;
-	//dbgprintf("stmt %p, indent %d, type '%c'\n", expr, indent, expr->nodetype);
 	for(stmt = root ; stmt != NULL ; stmt = stmt->next) {
 		cnfstmtPrintOnly(stmt, indent, 1);
 	}
@@ -4411,8 +4433,13 @@ cnfstmtNewAct(struct nvlst *lst)
 	struct cnfstmt* cnfstmt;
 	char namebuf[256];
 	rsRetVal localRet;
-	if((cnfstmt = cnfstmtNew(S_ACT)) == NULL)
+	if((cnfstmt = cnfstmtNew(S_ACT)) == NULL) {
 		goto done;
+	}
+	if (nvlstChkDisabled(lst)) {
+		dbgprintf("action disabled by configuration\n");
+		cnfstmt->nodetype = S_NOP;
+	}
 	localRet = actionNewInst(lst, &cnfstmt->d.act);
 	if(localRet == RS_RET_OK_WARN) {
 		parser_errmsg("warnings occured in file '%s' around line %d",
@@ -4533,7 +4560,7 @@ constFoldConcat(struct cnfexpr *expr)
 			cnfexprDestruct(expr->r);
 			expr->nodetype = 'S';
 			((struct cnfstringval*)expr)->estr = estr;
-		} else if(expr->r->nodetype == 'S') {
+		} else if(expr->r->nodetype == 'N') {
 			es_str_t *numstr;
 			estr = es_newStrFromNumber(((struct cnfnumval*)expr->l)->val);
 			numstr = es_newStrFromNumber(((struct cnfnumval*)expr->r)->val);
@@ -5073,12 +5100,13 @@ addMod2List(const int __attribute__((unused)) version, struct scriptFunct *funct
 /*version currently not used, might be needed later for versin check*/
 {
 	DEFiRet;
+	int i;
 	struct modListNode *newNode;
 	CHKmalloc(newNode = (struct modListNode*) malloc(sizeof(struct modListNode)));
 	newNode->version = 1;
 	newNode->next = NULL;
 
-	int i = 0;
+	i = 0;
 	while(functArray[i].fname != NULL) {
 		if(searchModList(functArray[i].fname) != NULL) {
 			parser_errmsg("function %s defined multiple times, second time will be ignored",
@@ -5273,6 +5301,11 @@ includeProcessCnf(struct nvlst *const lst)
 	if(lst == NULL) {
 		parser_errmsg("include() must have either 'file' or 'text' "
 			"parameter - ignored");
+		goto done;
+	}
+
+	if (nvlstChkDisabled(lst)) {
+		DBGPRINTF("include statement disabled\n");
 		goto done;
 	}
 

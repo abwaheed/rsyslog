@@ -2,37 +2,35 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.61)
-AC_INIT([rsyslog],[8.36.0.master],[rsyslog@lists.adiscon.com])
+AC_INIT([rsyslog],[8.2008.0.master],[rsyslog@lists.adiscon.com])  # UPDATE on release
+AC_DEFINE(VERSION_YEAR, 20, [year part of real rsyslog version])  # UPDATE on release
+AC_DEFINE(VERSION_MONTH, 8, [month part of real rsyslog version]) # UPDATE on release
 
-# AIXPORT START: Detect the underlying OS
-unamestr=$(uname)
-AM_CONDITIONAL([AIX], [test x$unamestr = xAIX])
-if test "$unamestr" = "AIX"; then
-	export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/usr/lib/pkgconfig"
-	LIBS="-lbsd -lsrc"
-	CPPFLAGS="-D_THREAD_SAFE -D_BSD43 -D_AIX"
-	CFLAGS="-D_AIX"
-	LDFLAGS="-qcpluscmt -brtl -bexpall -bE:strippedsymbols.exp "
-	LIBESTR_LIBS="-L/usr/lib/ -lestr"
-	LIBESTR_CFLAGS="-I/usr/include"
-	LIBLOGGING_STDLOG_LIBS="-L/usr/lib/ -llogging-stdlog"
-	LIBLOGGING_STDLOG_CFLAGS="-I/usr/include"
-	GNUTLS_LIBS="-L/usr/lib/ -lgnutls"
-	GNUTLS_CFLAGS="-I/usr/include"
-	RELP_LIBS="-L/usr/lib/ -lrelp"
-	RELP_CFLAGS="-I/usr/include"
-	CC="xlc_r"
-	AC_PREFIX_DEFAULT(/usr)
-	export  ac_cv_func_malloc_0_nonnull=yes
-	export ac_cv_func_realloc_0_nonnull=yes
-fi
-# AIXPORT END
-
-# change to the one below if Travis has a timeout
-#AM_INIT_AUTOMAKE([subdir-objects serial-tests])
 AM_INIT_AUTOMAKE([subdir-objects])
 
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+
+unamestr=$(uname)
+if test "$unamestr" = "AIX"; then
+	AC_ARG_ENABLE(aix64bits,
+		[AS_HELP_STRING([--enable-aix64bits],[Enable compilation of rsyslog using 64 bits @<:@default=no@:>@])],
+	        [case "${enableval}" in
+	         yes) enable_aix64bits="yes" ;;
+	          no) enable_aix64bits="no" ;;
+	           *) AC_MSG_ERROR(bad value ${enableval} for --enable-aix64bits) ;;
+	         esac],
+		[enable_aix64bits=no]
+	)
+
+	CFLAGS="$CFLAGS -D_LINUX_SOURCE_COMPAT"
+	LDFLAGS="-brtl"
+	if test "x$enable_aix64bits" == "xyes"; then
+		CFLAGS="$CFLAGS -q64"
+		LDFLAGS="$LDFLAGS -b64"
+		AR_CFLAGS="-X64 $AR_CFLAGS"
+		NM="$(which nm) -X64 rcu"
+	fi
+fi
 
 AC_CONFIG_SRCDIR([ChangeLog])
 AC_CONFIG_MACRO_DIR([m4])
@@ -78,6 +76,17 @@ else
 fi
 
 PKG_PROG_PKG_CONFIG
+
+AC_ARG_VAR(CONF_FILE_PATH, Configuration file path (default : /etc/rsyslog.conf))
+if test "$ac_cv_env_CONF_FILE_PATH_set" = "set"; then
+	AC_DEFINE_UNQUOTED(PATH_CONFFILE,  "${ac_cv_env_CONF_FILE_PATH_value}", "Configuration file path (default : /etc/rsyslog.conf)")
+fi
+
+AC_ARG_VAR(PID_FILE_PATH, Pid file path (default : /var/run/rsyslogd.pid))
+if test "$ac_cv_env_PID_FILE_PATH_set" = "set"; then
+	AC_DEFINE_UNQUOTED(PATH_PIDFILE,  "${ac_cv_env_PID_FILE_PATH_value}", "Pid file path (default : /var/run/rsyslogd.pid)")
+fi
+
 
 # modules we require
 PKG_CHECK_MODULES(LIBESTR, libestr >= 0.1.9)
@@ -129,6 +138,9 @@ case "${host}" in
 esac
 AM_CONDITIONAL(OS_APPLE, test x$os_type == xapple)
 AM_CONDITIONAL(OS_LINUX, test x$os_type == xlinux)
+AM_CONDITIONAL(OS_AIX, test x$os_type == xaix)
+
+AM_PATH_PYTHON(,, [:])
 
 # Running from git source?
 in_git_src=no
@@ -174,7 +186,7 @@ AC_CHECK_HEADERS([malloc.h],[],[],[
      #endif
   ]
 ])
-AC_CHECK_HEADERS([fcntl.h locale.h netdb.h netinet/in.h paths.h stddef.h stdlib.h string.h sys/file.h sys/ioctl.h sys/param.h sys/socket.h sys/time.h sys/stat.h sys/inotify.h unistd.h utmp.h utmpx.h sys/epoll.h sys/prctl.h sys/select.h])
+AC_CHECK_HEADERS([fcntl.h locale.h netdb.h netinet/in.h paths.h stddef.h stdlib.h string.h sys/file.h sys/ioctl.h sys/param.h sys/socket.h sys/time.h sys/stat.h unistd.h utmp.h utmpx.h sys/epoll.h sys/prctl.h sys/select.h getopt.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
@@ -207,9 +219,13 @@ AC_TYPE_SIGNAL
 AC_FUNC_STAT
 AC_FUNC_STRERROR_R
 AC_FUNC_VPRINTF
-AC_CHECK_FUNCS([flock inotify_init recvmmsg basename alarm clock_gettime gethostbyname gethostname gettimeofday localtime_r memset mkdir regcomp select setsid socket strcasecmp strchr strdup strerror strndup strnlen strrchr strstr strtol strtoul uname ttyname_r getline malloc_trim prctl epoll_create epoll_create1 fdatasync syscall lseek64])
+AC_CHECK_FUNCS([flock recvmmsg basename alarm clock_gettime gethostbyname gethostname gettimeofday localtime_r memset mkdir regcomp select setsid socket strcasecmp strchr strdup strerror strndup strnlen strrchr strstr strtol strtoul uname ttyname_r getline malloc_trim prctl epoll_create epoll_create1 fdatasync syscall lseek64 asprintf])
 AC_CHECK_FUNC([setns], [AC_DEFINE([HAVE_SETNS], [1], [Define if setns exists.])])
 AC_CHECK_TYPES([off64_t])
+
+AC_CHECK_HEADERS([sys/inotify.h], [rsyslog_sysinotify=yes])
+AC_CHECK_FUNCS([inotify_init], [rsyslog_inotify_init=yes])
+AM_CONDITIONAL(ENABLE_INOTIFY, test x$rsyslog_sysinotify = xyes -a x$rsyslog_inotify_init = xyes)
 
 # getifaddrs is in libc (mostly) or in libsocket (eg Solaris 11) or not defined (eg Solaris 10)
 AC_SEARCH_LIBS([getifaddrs], [socket], [AC_DEFINE(HAVE_GETIFADDRS, [1], [set define])])
@@ -236,11 +252,13 @@ AC_TRY_COMPILE([
 	AC_MSG_RESULT(yes)
 	,
 	# note: we use 1024 here, which should be far more than needed by any system. If that's too low, we simply
-	# life with the need to change it. Most of the code doesn't need it anyways, but there are a few places 
+	# life with the need to change it. Most of the code doesn't need it anyways, but there are a few places
 	# where it actually is needed and it makes no sense to change them.
 	AC_DEFINE(MAXHOSTNAMELEN, 1024, [Define with a value if your <sys/param.h> does not define MAXHOSTNAMELEN])
 	AC_MSG_RESULT(no; defined as 64)
 )
+
+# check if GNU's ld is used
 
 # Check for __builtin_expect()
 AC_MSG_CHECKING([for __builtin_expect()])
@@ -249,8 +267,6 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(, return __builtin_expect(main != 0, 1))],
                           Define to 1 if compiler supports __builtin_expect)
                 AC_MSG_RESULT([yes])],
                [AC_MSG_RESULT([no])])
-
-
 
 # check for availability of atomic operations
 # Note: this switch is primarily for the testbench, so that we can try
@@ -360,13 +376,13 @@ AC_ARG_ENABLE(fmhash-xxhash,
 AM_CONDITIONAL(ENABLE_FMHASH, [test "x$enable_fmhash" = "xyes" || test "x$enable_fmhash_xxhash" = "xyes"])
 
 AM_CONDITIONAL(ENABLE_FMHASH_XXHASH, test x$enable_fmhash_xxhash = xyes)
-if test "$enable_fmhash_xxhash" = "yes"; then  
+if test "$enable_fmhash_xxhash" = "yes"; then
 	AC_CHECK_LIB([xxhash], [XXH64], [
 		AC_CHECK_HEADER([xxhash.h], [
 			AC_DEFINE(USE_HASH_XXHASH, 1,
 				  [Using XXHASH for hash64.])
 			HASH_XXHASH_LIBS="-lxxhash"
-			AC_SUBST(HASH_XXHASH_LIBS)], 
+			AC_SUBST(HASH_XXHASH_LIBS)],
 			[AC_MSG_ERROR([Unable to add XXHASH support for hash64.])])
 	])
 fi
@@ -387,7 +403,7 @@ case "${os_type}" in
 solaris) GSSLIB=gss ;;
 *)       GSSLIB=gssapi_krb5 ;;
 esac
-  
+
 if test $enable_gssapi_krb5 = yes; then
 	AC_CHECK_LIB($GSSLIB, gss_acquire_cred, [
 		AC_CHECK_HEADER(gssapi/gssapi.h, [
@@ -419,29 +435,29 @@ AM_CONDITIONAL(ENABLE_ROOT_TESTS, test x$enable_root_tests = xyes)
 if test "$os_type" != "solaris"
 then
 	AC_CHECK_HEADERS(
-	    [pthread.h],
-	    [
-	      AC_CHECK_LIB(
-		[pthread],
-		[pthread_create],
+		[pthread.h],
 		[
-		  PTHREADS_LIBS="-lpthread"
-		  if test "$unamestr" = "AIX"; then
-			  PTHREADS_CFLAGS="-lpthreads" 
-		  else
-			  case "${os_type}" in
-			  solaris) PTHREADS_CFLAGS="-pthreads -std=c99" ;;
-			  *)       PTHREADS_CFLAGS="-pthread" ;;
-			  esac
-		  fi
-		  AC_SUBST(PTHREADS_LIBS)
-		  AC_SUBST(PTHREADS_CFLAGS)
+			AC_CHECK_LIB(
+				[pthread],
+				[pthread_create],
+				[
+					PTHREADS_LIBS="-lpthread"
+					if test "$unamestr" = "AIX"; then
+					case "${CC}" in
+						*xlc*|*xlC*) PTHREADS_CFLAGS="-qthreaded" ;;
+						*) PTHREADS_CFLAGS="-lpthreads" ;;
+					esac
+					else
+						PTHREADS_CFLAGS="-pthread"
+					fi
+					AC_SUBST(PTHREADS_LIBS)
+					AC_SUBST(PTHREADS_CFLAGS)
+				],
+				[AC_MSG_FAILURE([pthread is missing])],
+				[-lpthread]
+			)
 		],
-		[AC_MSG_FAILURE([pthread is missing])],
-		[-lpthread]
-	      )
-	    ],
-	    [AC_MSG_FAILURE([pthread is missing])]
+		[AC_MSG_FAILURE([pthread is missing])]
 	)
 fi
 
@@ -495,6 +511,9 @@ if test "$rsyslog_have_pthread_setschedparam" = "yes" -a "$rsyslog_have_sched_h"
 	LIBS=$save_LIBS
 fi
 
+if test "$unamestr" = "AIX"; then
+enable_klog="no"
+else
 # klog
 AC_ARG_ENABLE(klog,
         [AS_HELP_STRING([--enable-klog],[Integrated klog functionality @<:@default=yes@:>@])],
@@ -505,6 +524,7 @@ AC_ARG_ENABLE(klog,
          esac],
         [enable_klog="yes"]
 )
+fi
 AM_CONDITIONAL(ENABLE_IMKLOG, test x$enable_klog = xyes)
 AM_CONDITIONAL(ENABLE_IMKLOG_BSD, test x$os_type = xbsd)
 AM_CONDITIONAL(ENABLE_IMKLOG_LINUX, test x$os_type = xlinux)
@@ -673,7 +693,7 @@ AC_ARG_ENABLE(debug_symbols,
 )
 
 
-# total debugless: highest performance, but no way at all to enable debug 
+# total debugless: highest performance, but no way at all to enable debug
 # logging
 AC_ARG_ENABLE(debugless,
         [AS_HELP_STRING([--enable-debugless],[Enable runtime instrumentation mode @<:@default=no@:>@])],
@@ -701,21 +721,6 @@ AC_ARG_ENABLE(valgrind,
 )
 if test "$enable_valgrind" = "yes"; then
         AC_DEFINE(VALGRIND, 1, [Defined if valgrind support settings are to be enabled (e.g. prevents dlclose()).])
-fi
-
-
-# memcheck
-AC_ARG_ENABLE(memcheck,
-        [AS_HELP_STRING([--enable-memcheck],[Enable extended memory check support @<:@default=no@:>@])],
-        [case "${enableval}" in
-         yes) enable_memcheck="yes" ;;
-          no) enable_memcheck="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-memcheck) ;;
-         esac],
-        [enable_memcheck="no"]
-)
-if test "$enable_memcheck" = "yes"; then
-        AC_DEFINE(MEMCHECK, 1, [Defined if memcheck support settings are to be enabled (e.g. prevents dlclose()).])
 fi
 
 
@@ -755,29 +760,31 @@ AC_ARG_ENABLE(mysql,
          esac],
         [enable_mysql=no]
 )
-if test "x$enable_mysql" = "xyes"; then
-  AC_CHECK_PROG(
-    [MYSQL_CONFIG],
-    [mysql_config],
-    [mysql_config],
-    [no],,
-  )
-  if test "x${MYSQL_CONFIG}" = "xno"; then
-    AC_MSG_FAILURE([mysql_config not found - usually a package named mysql-dev, libmysql-dev or similar, is missing - install it to fix this issue])
-  fi
-  AC_CHECK_LIB(
-    [mysqlclient],
-    [mysql_init],
-    [MYSQL_CFLAGS=`$MYSQL_CONFIG --cflags`
-     MYSQL_LIBS=`$MYSQL_CONFIG --libs`
-    ],
-    [AC_MSG_FAILURE([MySQL library is missing])],
-    [`$MYSQL_CONFIG --libs`]
-  )
+AS_IF([test "x$enable_mysql" = "xyes"],[
+  PKG_CHECK_MODULES([MYSQL],[mysqlclient],,[
+    AC_CHECK_PROG(
+      [MYSQL_CONFIG],
+      [mysql_config],
+      [mysql_config],
+      [no],,
+    )
+    AS_IF([test "x${MYSQL_CONFIG}" = "xno"],[
+      AC_MSG_FAILURE([mysql_config not found - usually a package named mysql-dev, libmysql-dev or similar, is missing - install it to fix this issue])
+    ])
+    MYSQL_CFLAGS=`$MYSQL_CONFIG --cflags`
+    MYSQL_LIBS=`$MYSQL_CONFIG --libs`
+  ])
   AC_MSG_CHECKING(if we have mysql_library_init)
   save_CFLAGS="$CFLAGS"
   CFLAGS="$CFLAGS $MYSQL_CFLAGS"
   save_LIBS="$LIBS"
+  AC_CHECK_LIB(
+    [mysqlclient],
+    [mysql_init],
+    ,
+    [AC_MSG_FAILURE([MySQL library is missing])],
+    [$MYSQL_LIBS]
+  )
   LIBS="$LIBS $MYSQL_LIBS"
   AC_TRY_LINK(
     [#include <mysql.h>
@@ -787,7 +794,7 @@ if test "x$enable_mysql" = "xyes"; then
     [have_mysql_library_init=no])
   CFLAGS="$save_CFLAGS"
   LIBS="$save_LIBS"
-fi
+])
 AM_CONDITIONAL(ENABLE_MYSQL, test x$enable_mysql = xyes)
 if test "$have_mysql_library_init" = "yes"; then
   AC_DEFINE([HAVE_MYSQL_LIBRARY_INIT], [1], [mysql_library_init available])
@@ -807,24 +814,26 @@ AC_ARG_ENABLE(pgsql,
         [enable_pgsql=no]
 )
 if test "x$enable_pgsql" = "xyes"; then
-  AC_CHECK_PROG(
-    [PG_CONFIG],
-    [pg_config],
-    [pg_config],
-    [no],,,
-  )
-  if test "x${PG_CONFIG}" = "xno"; then
-    AC_MSG_FAILURE([pg_config not found])
-  fi
-  AC_CHECK_LIB(
-    [pq],
-    [PQconnectdb],
-    [PGSQL_CFLAGS="-I`$PG_CONFIG --includedir`"
-     PGSQL_LIBS="-L`$PG_CONFIG --libdir` -lpq"
-    ],
-    [AC_MSG_FAILURE([PgSQL library is missing])],
-    [-L`$PG_CONFIG --libdir`]
-  )
+	PKG_CHECK_MODULES([PGSQL], [libpq],, [
+	  AC_CHECK_PROG(
+	    [PG_CONFIG],
+	    [pg_config],
+	    [pg_config],
+	    [no],,,
+	  )
+	  if test "x${PG_CONFIG}" = "xno"; then
+	    AC_MSG_FAILURE([pg_config not found])
+	  fi
+	  AC_CHECK_LIB(
+	    [pq],
+	    [PQconnectdb],
+	    [PGSQL_CFLAGS="-I`$PG_CONFIG --includedir`"
+	     PGSQL_LIBS="-L`$PG_CONFIG --libdir` -lpq"
+	    ],
+	    [AC_MSG_FAILURE([PgSQL library is missing])],
+	    [-L`$PG_CONFIG --libdir`]
+	  )
+	])
 fi
 AM_CONDITIONAL(ENABLE_PGSQL, test x$enable_pgsql = xyes)
 AC_SUBST(PGSQL_CFLAGS)
@@ -836,22 +845,32 @@ AC_ARG_ENABLE(libdbi,
         [case "${enableval}" in
          yes) enable_libdbi="yes" ;;
           no) enable_libdbi="no" ;;
+          optional) enable_libdbi="optional" ;;
            *) AC_MSG_ERROR(bad value ${enableval} for --enable-libdbi) ;;
          esac],
         [enable_libdbi=no]
 )
-if test "x$enable_libdbi" = "xyes"; then
+libdbi_use_dummy="no"
+if test "x$enable_libdbi" = "xyes" -o x$enable_libdbi = xoptional; then
   AC_CHECK_HEADERS(
-    [dbi/dbi.h],,
-    [AC_MSG_FAILURE([libdbi is missing])]
+    [dbi/dbi.h],,[
+        AS_IF([test x$enable_libdbi = xyes],
+            AC_MSG_FAILURE([libdbi is missing])
+	)
+        libdbi_use_dummy="yes"
+     ]
   )
   AC_CHECK_LIB(
     [dbi],
     [dbi_initialize],
     [LIBDBI_CFLAGS=""
      LIBDBI_LIBS="-ldbi"
-    ],
-    [AC_MSG_FAILURE([libdbi library is missing])]
+    ], [
+        AS_IF([test x$enable_libdbi = xyes],
+            AC_MSG_FAILURE([libdbi is missing])
+	)
+        libdbi_use_dummy="yes"
+     ]
   )
   AC_CHECK_LIB(
     [dbi],
@@ -864,9 +883,11 @@ if test "x$enable_libdbi" = "xyes"; then
     [AC_DEFINE([HAVE_DBI_TXSUPP], [1], [Define to 1 if libdbi supports transactions])]
   )
 fi
-AM_CONDITIONAL(ENABLE_OMLIBDBI, test x$enable_libdbi = xyes)
+AM_CONDITIONAL(LIBDBI_USE_DUMMY, test x$libdbi_use_dummy = xyes)
+AM_CONDITIONAL(ENABLE_OMLIBDBI, test x$enable_libdbi = xyes -o x$enable_libdbi = xoptional)
 AC_SUBST(LIBDBI_CFLAGS)
 AC_SUBST(LIBDBI_LIBS)
+
 
 # SNMP support
 AC_ARG_ENABLE(snmp,
@@ -896,6 +917,17 @@ AM_CONDITIONAL(ENABLE_SNMP, test x$enable_snmp = xyes)
 AC_SUBST(SNMP_CFLAGS)
 AC_SUBST(SNMP_LIBS)
 
+# SNMP Test Support
+AC_ARG_ENABLE(snmp-tests,
+        [AS_HELP_STRING([--enable-snmp-tests],[Enable omsnmp tests @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_snmp_tests="yes" ;;
+          no) enable_snmp_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-snmp-tests) ;;
+         esac],
+        [enable_snmp_tests=no]
+)
+AM_CONDITIONAL(ENABLE_SNMP_TESTS, test x$enable_snmp_tests = xyes)
 
 # uuid support
 AC_ARG_ENABLE(uuid,
@@ -931,18 +963,88 @@ fi
 AM_CONDITIONAL(ENABLE_ELASTICSEARCH, test x$enable_elasticsearch = xyes)
 
 
+# clickhouse support
+AC_ARG_ENABLE(clickhouse,
+        [AS_HELP_STRING([--enable-clickhouse],[Enable clickhouse output module @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_clickhouse="yes" ;;
+          no) enable_clickhouse="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-clickhouse) ;;
+         esac],
+        [enable_clickhouse=no]
+)
+if test "x$enable_clickhouse" = "xyes"; then
+	PKG_CHECK_MODULES([CURL], [libcurl])
+	LT_LIB_M
+fi
+AM_CONDITIONAL(ENABLE_CLICKHOUSE, test x$enable_clickhouse = xyes)
+
+
+# omhttp support
+AC_ARG_ENABLE(omhttp,
+        [AS_HELP_STRING([--enable-omhttp],[Enable http output module @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_omhttp="yes" ;;
+          no) enable_omhttp="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-omhttp) ;;
+         esac],
+        [enable_omhttp=no]
+)
+if test "x$enable_omhttp" = "xyes"; then
+        PKG_CHECK_MODULES([CURL], [libcurl])
+        LT_LIB_M
+fi
+AM_CONDITIONAL(ENABLE_OMHTTP, test x$enable_omhttp = xyes)
+
+
 # capability to enable elasticsearch testbench tests. This requries that an ES test
-# environment is present on the local (127.0.0.1) machine. 
+# environment is present on the local (127.0.0.1) machine.
+# we support a "minimal" mode to take care of travis where we cannot run all tests
+# due to runtime constraints
 AC_ARG_ENABLE(elasticsearch_tests,
-        [AS_HELP_STRING([--enable-elasticsearch-tests],[enable MySQL specific tests in testbench @<:@default=no@:>@])],
+        [AS_HELP_STRING([--enable-elasticsearch-tests],[enable Elasticsearch specific tests in testbench @<:@default=no@:>@])],
         [case "${enableval}" in
          yes) enable_elasticsearch_tests="yes" ;;
           no) enable_elasticsearch_tests="no" ;;
+         minimal) enable_elasticsearch_tests="minimal" ;;
            *) AC_MSG_ERROR(bad value ${enableval} for --enable-elasticsearch-tests) ;;
          esac],
         [enable_elasticsearch_tests=no]
 )
 AM_CONDITIONAL(ENABLE_ELASTICSEARCH_TESTS, test x$enable_elasticsearch_tests = xyes)
+AM_CONDITIONAL(ENABLE_ELASTICSEARCH_TESTS_MINIMAL, test x$enable_elasticsearch_tests = xminimal -o x$enable_elasticsearch_tests = xyes)
+
+
+# capability to enable clickhouse testbench tests. This requries that a test
+# environment is present on the local (127.0.0.1) machine.
+AC_ARG_ENABLE(clickhouse_tests,
+        [AS_HELP_STRING([--enable-clickhouse-tests],[enable Elasticsearch specific tests in testbench @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_clickhouse_tests="yes" ;;
+          no) enable_clickhouse_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-clickhouse-tests) ;;
+         esac],
+        [enable_clickhouse_tests=no]
+)
+AM_CONDITIONAL(ENABLE_CLICKHOUSE_TESTS, test x$enable_clickhouse_tests = xyes)
+
+
+# openssl support
+AC_ARG_ENABLE(openssl,
+        [AS_HELP_STRING([--enable-openssl],[Enable openssl support @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_openssl="yes" ;;
+          no) enable_openssl="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-openssl) ;;
+         esac],
+        [enable_openssl=no]
+)
+if test "x$enable_openssl" = "xyes"; then
+	PKG_CHECK_MODULES(OPENSSL, openssl)
+	AC_DEFINE([ENABLE_OPENSSL], [1], [Indicator that openssl is present])
+	save_libs=$LIBS
+fi
+AM_CONDITIONAL(ENABLE_OPENSSL, test x$enable_openssl = xyes)
 
 
 # GnuTLS support
@@ -966,6 +1068,27 @@ if test "x$enable_gnutls" = "xyes"; then
 fi
 
 AM_CONDITIONAL(ENABLE_GNUTLS, test x$enable_gnutls = xyes)
+
+AC_ARG_ENABLE(gnutls-tests,
+        [AS_HELP_STRING([--enable-gnutls-tests],[Enable gnutls tests @<:@default=yes@:>@])],
+        [case "${enableval}" in
+         yes) enable_gnutls_tests="yes" ;;
+          no) enable_gnutls_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-gnutls-tests) ;;
+         esac],
+        [if [[ "$enable_gnutls" == "yes" ]]; then
+		enable_gnutls_tests=yes
+	else
+		enable_gnutls_tests=no
+	fi]
+)
+if  [[ "$enable_gnutls_tests" == "yes" ]] && [[ "$enable_gnutls" != "yes" ]]; then
+		AC_MSG_WARN([gnutls-tests can not be enabled without gnutls support. Disabling gnutls tests...])
+		enable_gnutls_tests="no"
+fi
+
+AM_CONDITIONAL(ENABLE_GNUTLS_TESTS, test x$enable_gnutls_tests = xyes)
+
 
 # libgcrypt support
 AC_ARG_ENABLE(libgcrypt,
@@ -1287,15 +1410,42 @@ AC_ARG_ENABLE(mmdblookup,
         [case "${enableval}" in
          yes) enable_mmdblookup="yes" ;;
           no) enable_mmdblookup="no" ;;
+         optional) enable_mmdblookup="optional" ;;
            *) AC_MSG_ERROR(bad value ${enableval} for --enable-mmdblookup) ;;
          esac],
         [enable_mmdblookup=no]
 )
-if test "x$enable_mmdblookup"; then
-        #PKG_CHECK_MODULES(LIBMAXMINDDB, libmaxminddb)
-        AC_CHECK_HEADERS([maxminddb.h])
+AM_CONDITIONAL(ENABLE_MMDBLOOKUP, test x$enable_mmdblookup = xyes -o x$enable_mmdblookup = xoptional)
+mmdblookup_use_dummy="no"
+if test x$enable_mmdblookup = xoptional -o x$enable_mmdblookup = xyes; then
+        #PKG_CHECK_MODULES(LIBMAXMINDDB, libmaxminddb) -- does not work - later?
+        AC_CHECK_HEADERS([maxminddb.h], [
+	], [
+		AS_IF([test x$enable_mmdblookup = xyes],
+			AC_MSG_ERROR(libmaxminddb library for mmdblookup could not be found)
+		)
+		mmdblookup_use_dummy="yes"
+		AC_DEFINE([ENABLE_MMBDLOOKUP_DUMMY], [1], [Indicator that we need to build a dummy module])
+	])
 fi
-AM_CONDITIONAL(ENABLE_MMDBLOOKUP, test x$enable_mmdblookup = xyes)
+AM_CONDITIONAL(MMDBLOOKUP_USE_DUMMY, test x$mmdblookup_use_dummy = xyes)
+
+
+# mmdarwin
+AC_ARG_ENABLE(mmdarwin,
+        [AS_HELP_STRING([--enable-mmdarwin],[Enable mmdb lookup helper @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_mmdarwin="yes" ;;
+          no) enable_mmdarwin="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-mmdarwin) ;;
+         esac],
+        [enable_mmdarwin=no]
+)
+if test "x$enable_mmdarwin"; then
+        AC_CHECK_HEADERS([protocol.h])
+fi
+AM_CONDITIONAL(ENABLE_MMDARWIN, test x$enable_mmdarwin = xyes)
+
 
 
 
@@ -1377,11 +1527,21 @@ if test "x$enable_relp" = "xyes"; then
 
         AC_CHECK_FUNC([relpSrvSetOversizeMode],
                       [AC_DEFINE([HAVE_RELPSRVSETOVERSIZEMODE], [1], [Define if relpSrvSetOversizeMode exists.])])
+        AC_CHECK_FUNC([relpSrvSetLstnAddr],
+                      [AC_DEFINE([HAVE_RELPSRVSETLSTNADDR], [1], [Define if relpSrvSetLstnAddr exists.])])
+        AC_CHECK_FUNC([relpEngineSetTLSLibByName],
+                      [AC_DEFINE([HAVE_RELPENGINESETTLSLIBBYNAME], [1], [Define if relpEngineSetTLSLibByName exists.])])
+        AC_CHECK_FUNC([relpSrvSetTlsConfigCmd],
+                      [AC_DEFINE([HAVE_RELPENGINESETTLSCFGCMD], [1], [Define if relpSrvSetTlsConfigCmd exists.])])
+
+        AC_CHECK_FUNC([relpSrvSetTlsConfigCmd],
+                      [HAVE_RELPENGINESETTLSCFGCMD=1])
 
         CFLAGS="$save_CFLAGS"
         LIBS="$save_LIBS"
 fi
 AM_CONDITIONAL(ENABLE_RELP, test x$enable_relp = xyes)
+AM_CONDITIONAL([USE_RELPENGINESETTLSCFGCMD], [test "x$HAVE_RELPENGINESETTLSCFGCMD" = x1])
 
 # RELP default port
 AC_ARG_ENABLE(omrelp-default-port,
@@ -1403,11 +1563,18 @@ AC_ARG_ENABLE(ksi-ls12,
         [enable_ksi_ls12=no]
 )
 if test "x$enable_ksi_ls12" = "xyes"; then
-	PKG_CHECK_MODULES(GT_KSI_LS12, libksi >= 3.16.0)
+	PKG_CHECK_MODULES(GT_KSI_LS12, libksi >= 3.19.0)
 fi
 AM_CONDITIONAL(ENABLE_KSI_LS12, test x$enable_ksi_ls12 = xyes)
 
 # liblogging-stdlog support
+# we use liblogging-stdlog inside the testbench, which is why we need to check for it in any case
+PKG_CHECK_MODULES(LIBLOGGING_STDLOG, liblogging-stdlog >= 1.0.3,
+        [AC_DEFINE(HAVE_LIBLOGGING_STDLOG, 1, [Define to 1 if liblogging-stdlog is available.])
+        found_liblogging_stdlog="yes"],
+        [AC_MSG_NOTICE([liblogging-stdlog not found, parts of the testbench will not run])]
+)
+
 AC_ARG_ENABLE(liblogging-stdlog,
         [AS_HELP_STRING([--enable-liblogging-stdlog],[Enable liblogging-stdlog support @<:@default=no@:>@])],
         [case "${enableval}" in
@@ -1417,13 +1584,10 @@ AC_ARG_ENABLE(liblogging-stdlog,
          esac],
         [enable_liblogging_stdlog=no]
 )
-if test "x$enable_liblogging_stdlog" = "xyes"; then
-        PKG_CHECK_MODULES(LIBLOGGING_STDLOG, liblogging-stdlog >= 1.0.3,
-		AC_DEFINE(HAVE_LIBLOGGING_STDLOG, 1, [Define to 1 if liblogging-stdlog is available.])
-        )
+if test "x$enable_liblogging_stdlog" = "xyes" -a "x$found_liblogging_stdlog" != "xyes"; then
+	AC_MSG_ERROR(--enable-liblogging-stdlog set but liblogging-stdlog was not found)
 fi
-AM_CONDITIONAL(ENABLE_LIBLOGGING_STDLOG, test x$enable_liblogging_stdlog = xyes)
-
+AM_CONDITIONAL(ENABLE_LIBLOGGING_STDLOG, [test "x$enable_liblogging_stdlog" = "xyes"])
 
 # RFC 3195 support
 AC_ARG_ENABLE(rfc3195,
@@ -1458,7 +1622,7 @@ AC_ARG_ENABLE(testbench,
 # on some platforms. This provides the ability to turn it off. In the
 # longer term, we should consider writing our own replacement.
 AC_ARG_ENABLE(libfaketime,
-        [AS_HELP_STRING([--enable-libfaketime],[testbench1 enabled @<:@default=no@:>@])],
+        [AS_HELP_STRING([--enable-libfaketime],[libfaketime enabled @<:@default=no@:>@])],
         [case "${enableval}" in
          yes) enable_libfaketime="yes" ;;
           no) enable_libfaketime="no" ;;
@@ -1466,36 +1630,24 @@ AC_ARG_ENABLE(libfaketime,
          esac],
         [enable_libfaketime=no]
 )
-
-# under Travis, we have a ~50 minute max runtime per VM. So we permit to
-# split the testbench in multiple runs, which we can place into different
-# VMs. It's not perfect, but it works...
-AC_ARG_ENABLE(testbench1,
-        [AS_HELP_STRING([--enable-testbench1],[testbench1 enabled @<:@default=yes@:>@])],
-        [case "${enableval}" in
-         yes) enable_testbench1="yes" ;;
-          no) enable_testbench1="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-testbench1) ;;
-         esac],
-        [enable_testbench1=yes]
-)
 AM_CONDITIONAL(ENABLE_LIBFAKETIME, test "x${enable_libfaketime}" = "xyes")
 
-# under Travis, we have a ~50 minute max runtime per VM. So we permit to
-# split the testbench in multiple runs, which we can place into different
-# VMs. It's not perfect, but it works...
-AC_ARG_ENABLE(testbench2,
-        [AS_HELP_STRING([--enable-testbench2],[testbench2 enabled @<:@default=yes@:>@])],
+# this permits to control the "default tests" in testbench runs. These
+# are those tests that do not need a special configure option. There are
+# some situations where we really want to turn them of so that we can
+# run tests only for a specific component (e.g. ElasticSearch).
+# This also enables us to do some parallel testing even while the
+# testbench is not yet able to support make -j check
+AC_ARG_ENABLE(default-tests,
+        [AS_HELP_STRING([--enable-default-tests],[default-tests enabled @<:@default=yes@:>@])],
         [case "${enableval}" in
-         yes) enable_testbench2="yes" ;;
-          no) enable_testbench2="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-testbench2) ;;
+         yes) enable_default_tests="yes" ;;
+          no) enable_default_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-default-tests) ;;
          esac],
-        [enable_testbench2=yes]
+        [enable_default_tests=yes]
 )
-
-AM_CONDITIONAL(ENABLE_TESTBENCH1, test "x${enable_testbench1}" = "xyes")
-AM_CONDITIONAL(ENABLE_TESTBENCH2, test "x${enable_testbench2}" = "xyes")
+AM_CONDITIONAL(ENABLE_DEFAULT_TESTS, test "x${enable_default_tests}" = "xyes")
 
 AC_CHECK_PROG(IP, [ip], [yes], [no])
 if test "x${IP}" = "xno"; then
@@ -1526,6 +1678,42 @@ else
 fi
 AM_CONDITIONAL([HAVE_VALGRIND], [test "x$with_valgrind_testbench" != "xno" && test "x$VALGRIND" != "xno"])
 
+# ability to disable helgrind tests - we at least need this for
+# clang coverage reports, where we cannot suppress the races
+AC_ARG_ENABLE(helgrind,
+        [AS_HELP_STRING([--enable-helgrind],[valgrind helgrind enabled @<:@default=yes@:>@])],
+        [case "${enableval}" in
+         yes) enable_helgrind="yes" ;;
+          no) enable_helgrind="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-helgrind) ;;
+         esac],
+        [enable_helgrind=yes]
+)
+AM_CONDITIONAL(ENABLE_HELGRIND, test x$enable_helgrind = xyes)
+
+# settings for the batch report input module
+AC_ARG_ENABLE(imbatchreport,
+        [AS_HELP_STRING([--enable-imbatchreport],[batch report input module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_imbatchreport="yes" ;;
+          no) enable_imbatchreport="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imbatchreport) ;;
+         esac],
+        [enable_imbatchreport=no]
+)
+AM_CONDITIONAL(ENABLE_IMBATCHREPORT, test x$enable_imbatchreport = xyes)
+
+# settings for the db2diag parser module
+AC_ARG_ENABLE(pmdb2diag,
+        [AS_HELP_STRING([--enable-pmdb2diag],[db2diag parser module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_pmdb2diag="yes" ;;
+          no) enable_pmdb2diag="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-pmdb2diag) ;;
+         esac],
+        [enable_pmdb2diag=no]
+)
+AM_CONDITIONAL(ENABLE_PMDB2DIAG, test x$enable_pmdb2diag = xyes)
 
 # settings for the file input module
 AC_ARG_ENABLE(imfile,
@@ -1555,6 +1743,74 @@ if test "x$enable_imfile" = "xyes"; then
 fi
 AM_CONDITIONAL(ENABLE_IMFILE, test x$enable_imfile = xyes)
 
+AC_ARG_ENABLE(imfile-tests,
+        [AS_HELP_STRING([--enable-imfile-tests],[Enable imfile tests @<:@default=yes@:>@])],
+        [case "${enableval}" in
+         yes) enable_imfile_tests="yes" ;;
+          no) enable_imfile_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imfile-tests) ;;
+         esac],
+        [enable_imfile_tests=yes]
+)
+if  [[ "$enable_imfile_tests" == "yes" ]] && [[ "$enable_imfile" != "yes" ]]; then
+		AC_MSG_WARN([imfile-tests can not be enabled without imfile support. Disabling imfile tests...])
+		enable_imfile_tests="no"
+fi
+AM_CONDITIONAL(ENABLE_IMFILE_TESTS, test x$enable_imfile_tests = xyes)
+
+
+# settings for the docker log input module
+AC_ARG_ENABLE(imdocker,
+        [AS_HELP_STRING([--enable-imdocker],[input docker module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_imdocker="yes" ;;
+          no) enable_imdocker="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imdocker) ;;
+         esac],
+        [enable_imdocker=no]
+)
+if test "x$enable_imdocker" = "xyes"; then
+	AC_CHECK_HEADERS([curl/curl.h])
+	PKG_CHECK_MODULES([CURL], [libcurl >= 7.40.0])
+fi
+AM_CONDITIONAL(ENABLE_IMDOCKER, test x$enable_imdocker = xyes)
+
+AC_ARG_ENABLE(imdocker-tests,
+        [AS_HELP_STRING([--enable-imdocker-tests],[Enable imdocker tests @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_imdocker_tests="yes" ;;
+          no) enable_imdocker_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imdocker-tests) ;;
+         esac],
+        [enable_imdocker_tests=no]
+)
+
+AM_CONDITIONAL(ENABLE_IMDOCKER_TESTS, test x$enable_imdocker_tests = xyes)
+
+
+# settings for the tuxedo ULOG input module
+AC_ARG_ENABLE(imtuxedoulog,
+        [AS_HELP_STRING([--enable-imtuxedoulog],[tuxedo ULOG input module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_imtuxedoulog="yes" ;;
+          no) enable_imtuxedoulog="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imtuxedoulog) ;;
+         esac],
+        [enable_imtuxedoulog=no]
+)
+AM_CONDITIONAL(ENABLE_IMTUXEDOULOG, test x$enable_imtuxedoulog = xyes)
+
+# settings for the external program input module
+AC_ARG_ENABLE(improg,
+        [AS_HELP_STRING([--enable-improg],[external program input module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_improg="yes" ;;
+          no) enable_improg="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-improg) ;;
+         esac],
+        [enable_improg=no]
+)
+AM_CONDITIONAL(ENABLE_IMPROG, test x$enable_improg = xyes)
 
 # settings for the door input module (under solaris, thus default off)
 AC_ARG_ENABLE(imsolaris,
@@ -1593,6 +1849,24 @@ AC_ARG_ENABLE(impstats,
 )
 AM_CONDITIONAL(ENABLE_IMPSTATS, test x$enable_impstats = xyes)
 
+# settings for the pcap input module
+AC_ARG_ENABLE(impcap,
+        [AS_HELP_STRING([--enable-impcap],[libpcap input module enabled @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_impcap="yes" ;;
+          no) enable_impcap="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-impcap) ;;
+         esac],
+        [enable_impcap=no]
+)
+
+if test "x$enable_impcap" = "xyes"; then
+				AC_CHECK_HEADERS([pcap.h],
+				[AC_MSG_NOTICE([pcap found])],
+				AC_MSG_ERROR([libpcap library and headers not found])
+				)
+fi
+AM_CONDITIONAL(ENABLE_IMPCAP, test x$enable_impcap = xyes)
 
 # settings for the omprog output module
 AC_ARG_ENABLE(omprog,
@@ -1676,6 +1950,22 @@ if test "x$enable_omjournal" = "xyes"; then
 	])
 fi
 AM_CONDITIONAL(ENABLE_OMJOURNAL, test x$enable_omjournal = xyes)
+
+# capability to enable journal testbench tests. They have very special requirements,
+# so it does not make sense to have them run by default.
+# Also note that as of now, they have a pretty high rate of false positives due
+# to bugs in the journal.
+# see also https://github.com/rsyslog/rsyslog/issues/2931#issuecomment-416914707
+AC_ARG_ENABLE(journal_tests,
+        [AS_HELP_STRING([--enable-journal-tests],[enable systemd journal specific tests in testbench @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_journal_tests="yes" ;;
+          no) enable_journal_tests="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-journal-tests) ;;
+         esac],
+        [enable_journal_tests=no]
+)
+AM_CONDITIONAL(ENABLE_JOURNAL_TESTS, test x$enable_journal_tests = xyes)
 
 
 # settings for pmlastmsg
@@ -1842,6 +2132,7 @@ AC_ARG_ENABLE(omkafka,
         [case "${enableval}" in
          yes) enable_omkafka="yes" ;;
           no) enable_omkafka="no" ;;
+         optional) enable_omkafka="optional" ;;
            *) AC_MSG_ERROR(bad value ${enableval} for --enable-omkafka) ;;
          esac],
         [enable_omkafka=no]
@@ -1851,6 +2142,7 @@ AC_ARG_ENABLE(imkafka,
         [case "${enableval}" in
          yes) enable_imkafka="yes" ;;
           no) enable_imkafka="no" ;;
+         optional) enable_imkafka="optional" ;;
            *) AC_MSG_ERROR(bad value ${enableval} for --enable-imkafka) ;;
          esac],
         [enable_imkafka=no]
@@ -1879,17 +2171,26 @@ AC_ARG_ENABLE(kafka_static,
 AM_CONDITIONAL(ENABLE_KAFKA_STATIC, test x$enable_kafka_static = xyes)
 
 # omkafka works with older library
-if test "x$enable_omkafka" = "xyes"; then
-	PKG_CHECK_MODULES([LIBRDKAFKA], [rdkafka],, [
+omkafka_use_dummy="no"
+if test "$enable_omkafka" = "yes" -o "$enable_omkafka" = "optional"; then
+	PKG_CHECK_MODULES([LIBRDKAFKA], [rdkafka >= 0.9.1],, [
 		PKG_CHECK_MODULES([LIBRDKAFKA], [librdkafka],, [
-			AC_CHECK_LIB([rdkafka], [rd_kafka_produce], [
+			AC_CHECK_LIB([rdkafka], [rd_kafka_last_error], [
 				AC_MSG_WARN([librdkafka is missing but library present, using -lrdkafka])
 				LIBRDKAFKA_LIBS=-lrdkafka
 			], [
-				AC_MSG_ERROR([could not find rdkafka library])
+				AS_IF([test "$enable_omkafka" = "yes"],
+					AC_MSG_ERROR([could not find rdkafka library])
+				)
+				AC_MSG_NOTICE([omkafka: no suiteable build environment, use omkafka dummy])
+				omkafka_use_dummy=yes
+				AC_DEFINE([ENABLE_OMKAFKA_DUMMY], [1], [Indicator that we need to build a dummy omkafka module])
 			])
 		])
 	])
+fi
+AM_CONDITIONAL(OMKAFKA_USE_DUMMY, test x$omkafka_use_dummy = xyes)
+if test "$enable_omkafka" = "yes" -o "$enable_omkafka" = "optional" && test "$omkafka_use_dummy" = "no"; then
 	AC_CHECK_HEADERS([librdkafka/rdkafka.h])
 
 	# Add additional dependencies if statically linking rdkafka
@@ -1905,16 +2206,25 @@ if test "x$enable_omkafka" = "xyes"; then
 	fi
 fi
 
+imkafka_use_dummy="no"
 # imkafka needs newer library
-if test "x$enable_imkafka" = "xyes"; then
+if test "x$enable_imkafka" = "xyes" -o "$enable_imkafka" = "optional"; then
 	PKG_CHECK_MODULES([LIBRDKAFKA], [rdkafka >= 0.9.1],, [
-		AC_CHECK_LIB([rdkafka], [rd_kafka_produce], [
+		AC_CHECK_LIB([rdkafka], [rd_kafka_consumer_poll], [
 			AC_MSG_WARN([librdkafka is missing but library present, using -lrdkafka])
 			LIBRDKAFKA_LIBS=-lrdkafka
 		], [
-			AC_MSG_ERROR([could not find rdkafka library])
+			AS_IF([test "$enable_imkafka" = "yes"],
+				AC_MSG_ERROR([could not find sufficiently current rdkafka library])
+			)
+			AC_MSG_NOTICE([imkafka: no suiteable build environment, use imkafka dummy])
+			imkafka_use_dummy=yes
+			AC_DEFINE([ENABLE_IMKAFKA_DUMMY], [1], [Indicator that we need to build a dummy imkafka module])
 		])
 	])
+fi
+AM_CONDITIONAL(IMKAFKA_USE_DUMMY, test x$imkafka_use_dummy = xyes)
+if test "$enable_imkafka" = "yes" -o "$enable_imkafka" = "optional" && test "$imkafka_use_dummy" = "no"; then
 	AC_CHECK_HEADERS([librdkafka/rdkafka.h])
 
 	# Add additional dependencies if statically linking rdkafka
@@ -1949,8 +2259,8 @@ else
 		enable_kafka_tests="no"
 	fi
 fi
-AM_CONDITIONAL(ENABLE_OMKAFKA, test x$enable_omkafka = xyes)
-AM_CONDITIONAL(ENABLE_IMKAFKA, test x$enable_imkafka = xyes)
+AM_CONDITIONAL(ENABLE_OMKAFKA, test x$enable_omkafka = xyes -o x$enable_omkafka = xoptional)
+AM_CONDITIONAL(ENABLE_IMKAFKA, test x$enable_imkafka = xyes -o x$enable_imkafka = xoptional)
 
 #MONGODB SUPPORT
 
@@ -1965,26 +2275,12 @@ AC_ARG_ENABLE(ommongodb,
 )
 if test "x$enable_ommongodb" = "xyes"; then
 	PKG_CHECK_MODULES(LIBMONGOC, libmongoc-1.0)
+    AC_CHECK_FUNCS(mongoc_client_set_ssl_opts,,)
+
 fi
 AM_CONDITIONAL(ENABLE_OMMONGODB, test x$enable_ommongodb = xyes)
 # end of mongodb code
 
-# BEGIN ZMQ3 INPUT SUPPORT
-AC_ARG_ENABLE(imzmq3,
-        [AS_HELP_STRING([--enable-imzmq3],[Compiles imzmq3 output module @<:@default=no@:>@])],
-        [case "${enableval}" in
-         yes) enable_imzmq3="yes" ;;
-          no) enable_imzmq3="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-imzmq3) ;;
-         esac],
-        [enable_imzmq3=no]
-)
-if test "x$enable_imzmq3" = "xyes"; then
-	PKG_CHECK_MODULES(CZMQ, libczmq >= 1.1.0)
-fi
-AM_CONDITIONAL(ENABLE_IMZMQ3, test x$enable_imzmq3 = xyes)
-
-# END ZMQ3 INPUT SUPPORT
 
 # BEGIN CZMQ INPUT SUPPORT
 AC_ARG_ENABLE(imczmq,
@@ -1997,28 +2293,12 @@ AC_ARG_ENABLE(imczmq,
         [enable_imczmq=no]
 )
 if test "x$enable_imczmq" = "xyes"; then
-	PKG_CHECK_MODULES(CZMQ, libczmq >= 3.0.0)
+	PKG_CHECK_MODULES(CZMQ, libczmq >= 4.0.0)
 fi
 AM_CONDITIONAL(ENABLE_IMCZMQ, test x$enable_imczmq = xyes)
 
 # END CZMQ INPUT
 
-# BEGIN ZMQ3 OUTPUT SUPPORT
-AC_ARG_ENABLE(omzmq3,
-        [AS_HELP_STRING([--enable-omzmq3],[Compiles omzmq3 output module @<:@default=no@:>@])],
-        [case "${enableval}" in
-         yes) enable_omzmq3="yes" ;;
-          no) enable_omzmq3="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-omzmq3) ;;
-         esac],
-        [enable_omzmq3=no]
-)
-if test "x$enable_omzmq3" = "xyes"; then
-	PKG_CHECK_MODULES(CZMQ, libczmq >= 1.1.0)
-fi
-AM_CONDITIONAL(ENABLE_OMZMQ3, test x$enable_omzmq3 = xyes)
-
-# END ZMQ3 SUPPORT
 
 # BEGIN CZMQ OUTPUT SUPPORT
 AC_ARG_ENABLE(omczmq,
@@ -2026,12 +2306,12 @@ AC_ARG_ENABLE(omczmq,
         [case "${enableval}" in
          yes) enable_omczmq="yes" ;;
           no) enable_omczmq="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-omzmq3) ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-omczmq) ;;
          esac],
         [enable_omczmq=no]
 )
 if test "x$enable_omczmq" = "xyes"; then
-   PKG_CHECK_MODULES(CZMQ, libczmq >= 3.0.2)
+   PKG_CHECK_MODULES(CZMQ, libczmq >= 4.0.0)
 fi
 AM_CONDITIONAL(ENABLE_OMCZMQ, test x$enable_omczmq = xyes)
 
@@ -2197,6 +2477,20 @@ AM_CONDITIONAL(ENABLE_MMKUBERNETES, test x$enable_mmkubernetes = xyes)
 
 # END Kubernetes metadata support
 
+
+# mmtaghostname
+AC_ARG_ENABLE(mmtaghostname,
+        [AS_HELP_STRING([--enable-mmtaghostname],[Enable Tag and Hostname messages' modifier @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_mmtaghostname="yes" ;;
+          no) enable_mmtaghostname="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-mmtaghostname) ;;
+         esac],
+        [enable_mmtaghostname=no]
+)
+AM_CONDITIONAL(ENABLE_MMTAGHOSTNAME, test x$enable_mmtaghostname = xyes)
+#END mmtaghostname
+
 # man pages
 have_to_generate_man_pages="no"
 git_src_have_to_generate_man_pages="yes" # default to use when building from git source
@@ -2213,10 +2507,10 @@ AC_ARG_ENABLE(generate-man-pages,
 )
 
 
-# This provides a work-around to use "make distcheck" by disabling
-# some tests that do have problems with the distcheck environment.
+# This provides a work-around to use "make distcheck" without
+# running tests (mode used pre 2018-07-02)
 AC_ARG_ENABLE(distcheck-workaround,
-        [AS_HELP_STRING([--enable-distcheck-workaround],[enable to use make distcheck by disabling some tests that do not support the distcheck environment @<:@default=no@:>@])],
+        [AS_HELP_STRING([--enable-distcheck-workaround],[enable to use make distcheck without runing testbench inside it @<:@default=no@:>@])],
         [case "${enableval}" in
          yes) enable_distcheck_workaround="yes" ;;
           no) enable_distcheck_workaround="no" ;;
@@ -2307,9 +2601,12 @@ AC_CONFIG_FILES([Makefile \
 		plugins/mmfields/Makefile \
 		plugins/mmpstrucdata/Makefile \
 		plugins/omelasticsearch/Makefile \
+		plugins/omclickhouse/Makefile \
 		plugins/mmsnmptrapd/Makefile \
 		plugins/pmlastmsg/Makefile \
 		plugins/mmdblookup/Makefile \
+    contrib/mmdarwin/Makefile \
+		contrib/omhttp/Makefile \
 		contrib/fmhash/Makefile \
 		contrib/pmsnare/Makefile \
 		contrib/pmpanngfw/Makefile \
@@ -2319,9 +2616,7 @@ AC_CONFIG_FILES([Makefile \
 		contrib/imkmsg/Makefile \
 		contrib/mmgrok/Makefile \
 		contrib/mmcount/Makefile \
-		contrib/omzmq3/Makefile \
 		contrib/omczmq/Makefile \
-		contrib/imzmq3/Makefile \
 		contrib/imczmq/Makefile \
 		contrib/mmsequence/Makefile \
 		contrib/mmrfc5424addhmac/Makefile \
@@ -2329,8 +2624,16 @@ AC_CONFIG_FILES([Makefile \
 		contrib/omhttpfs/Makefile \
 		contrib/omamqp1/Makefile \
 		contrib/omtcl/Makefile \
+		contrib/imbatchreport/Makefile \
 		contrib/omfile-hardened/Makefile \
 		contrib/mmkubernetes/Makefile \
+		contrib/impcap/Makefile \
+		contrib/imtuxedoulog/Makefile \
+		contrib/improg/Makefile \
+		contrib/mmtaghostname/Makefile \
+		contrib/imdocker/Makefile \
+		contrib/pmdb2diag/Makefile \
+		tests/set-envvars \
 		tests/Makefile])
 AC_OUTPUT
 
@@ -2351,22 +2654,30 @@ echo "    anonymization support enabled:            $enable_mmanon"
 echo "    message counting support enabled:         $enable_mmcount"
 echo "    liblogging-stdlog support enabled:        $enable_liblogging_stdlog"
 echo "    libsystemd enabled:                       $enable_libsystemd"
-echo "    libcurl enabled:                          $enable_libcurl"
 echo "    kafka static linking enabled:             $enable_kafka_static"
 echo "    atomic operations enabled:                $enable_atomic_operations"
 echo
 echo "---{ input plugins }---"
+if test "$unamestr" != "AIX"; then
 echo "    Klog functionality enabled:               $enable_klog ($os_type)"
+fi
 echo "    /dev/kmsg functionality enabled:          $enable_kmsg"
 echo "    plain tcp input module enabled:           $enable_imptcp"
 echo "    imdiag enabled:                           $enable_imdiag"
 echo "    file input module enabled:                $enable_imfile"
+echo "    docker log input module enabled:          $enable_imdocker"
 echo "    Solaris input module enabled:             $enable_imsolaris"
 echo "    periodic statistics module enabled:       $enable_impstats"
-echo "    imzmq3 input module enabled:              $enable_imzmq3"
 echo "    imczmq input module enabled:              $enable_imczmq"
 echo "    imjournal input module enabled:           $enable_imjournal"
+echo "    imbatchreport input module enabled:       $enable_imbatchreport"
 echo "    imkafka module will be compiled:          $enable_imkafka"
+if test "$enable_imkafka" = "optional"; then
+echo "        imkafka use dummy:                    $imkafka_use_dummy"
+fi
+echo "    impcap input module enabled:              $enable_impcap"
+echo "    imtuxedoulog module will be compiled:     $enable_imtuxedoulog"
+echo "    improg input module enabled:              $enable_improg"
 echo
 echo "---{ output plugins }---"
 echo "    Mail support enabled:                     $enable_mail"
@@ -2376,10 +2687,11 @@ echo "    omstdout module will be compiled:         $enable_omstdout"
 echo "    omjournal module will be compiled:        $enable_omjournal"
 echo "    omhdfs module will be compiled:           $enable_omhdfs"
 echo "    omelasticsearch module will be compiled:  $enable_elasticsearch"
+echo "    omclickhouse module will be compiled:     $enable_clickhouse"
+echo "    omhttp module will be compiled:           $enable_omhttp"
 echo "    omruleset module will be compiled:        $enable_omruleset"
 echo "    omudpspoof module will be compiled:       $enable_omudpspoof"
 echo "    omuxsock module will be compiled:         $enable_omuxsock"
-echo "    omzmq3 module will be compiled:           $enable_omzmq3"
 echo "    omczmq module will be compiled:           $enable_omczmq"
 echo "    omrabbitmq module will be compiled:       $enable_omrabbitmq"
 echo "    omhttpfs module will be compiled:         $enable_omhttpfs"
@@ -2395,6 +2707,7 @@ echo "    pmnull module will be compiled:           $enable_pmnull"
 echo "    pmnormalize module will be compiled:      $enable_pmnormalize"
 echo "    pmaixforwardedfrom module w.be compiled:  $enable_pmaixforwardedfrom"
 echo "    pmsnare module will be compiled:          $enable_pmsnare"
+echo "    pmdb2diag module will be compiled:        $enable_pmdb2diag"
 echo "    pmpanngfw module will be compiled:        $enable_pmpanngfw"
 echo
 echo "---{ message modification modules }---"
@@ -2408,18 +2721,24 @@ echo "    mmrfc5424addhmac enabled:                 $enable_mmrfc5424addhmac"
 echo "    mmpstrucdata enabled:                     $enable_mmpstrucdata"
 echo "    mmsequence enabled:                       $enable_mmsequence"
 echo "    mmdblookup enabled:                       $enable_mmdblookup"
+echo "    mmdarwin enabled:                         $enable_mmdarwin"
 echo "    mmfields enabled:                         $enable_mmfields"
 echo "    mmrm1stspace module enabled:              $enable_mmrm1stspace"
 echo "    mmkubernetes enabled:                     $enable_mmkubernetes"
+echo "    mmtaghostname enabled:                    $enable_mmtaghostname"
 echo
 echo "---{ database support }---"
 echo "    MySql support enabled:                    $enable_mysql"
 echo "    libdbi support enabled:                   $enable_libdbi"
+if test "$enable_libdbi" = "optional"; then
+echo "        libdbi use dummy:                     $libdbi_use_dummy"
+fi
 echo "    PostgreSQL support enabled:               $enable_pgsql"
 echo "    mongodb support enabled:                  $enable_ommongodb"
 echo "    hiredis support enabled:                  $enable_omhiredis"
 echo
 echo "---{ protocol support }---"
+echo "    openssl network stream driver enabled:    $enable_openssl"
 echo "    GnuTLS network stream driver enabled:     $enable_gnutls"
 echo "    GSSAPI Kerberos 5 support enabled:        $enable_gssapi_krb5"
 echo "    RELP support enabled:                     $enable_relp"
@@ -2431,18 +2750,26 @@ echo "    fmhash enabled:                           $enable_fmhash"
 echo "    fmhash with xxhash enabled:               $enable_fmhash_xxhash"
 echo
 echo "---{ debugging support }---"
+echo "    distcheck workaround enabled:             $enable_distcheck_workaround"
 echo "    Testbench enabled:                        $enable_testbench"
-echo "    Testbench1 enabled:                       $enable_testbench1"
-echo "    Testbench2 enabled:                       $enable_testbench2"
+echo "    valgrind tests enabled:                   $with_valgrind_testbench"
+echo "    valgrind helgrind tests enabled:          $enable_helgrind"
+echo "    Default tests enabled:                    $enable_default_tests"
 echo "    Testbench libfaketime tests enabled:      $enable_libfaketime"
 echo "    Extended Testbench enabled:               $enable_extended_tests"
 echo "    MySQL Tests enabled:                      $enable_mysql_tests"
+echo "    Elasticsearch Tests:                      $enable_elasticsearch_tests"
+echo "    ClickHouse Tests:                         $enable_clickhouse_tests"
 echo "    PostgreSQL Tests enabled:                 $enable_pgsql_tests"
 echo "    Kafka Tests enabled:                      $enable_kafka_tests"
+echo "    Imdocker Tests enabled:                   $enable_imdocker_tests"
+echo "    gnutls tests enabled:                     $enable_gnutls_tests"
+echo "    imfile tests enabled:                     $enable_imfile_tests"
+echo "    systemd journal tests enabled:            $enable_journal_tests"
+echo "    SNMP Tests enabled:                       $enable_snmp_tests"
 echo "    Debug mode enabled:                       $enable_debug"
 echo "    (total) debugless mode enabled:           $enable_debugless"
 echo "    Diagnostic tools enabled:                 $enable_diagtools"
 echo "    End-User tools enabled:                   $enable_usertools"
-echo "    Enhanced memory checking enabled:         $enable_memcheck"
 echo "    Valgrind support settings enabled:        $enable_valgrind"
 echo

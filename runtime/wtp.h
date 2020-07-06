@@ -1,17 +1,17 @@
 /* Definition of the worker thread pool (wtp) object.
  *
- * Copyright 2008-2012 Adiscon GmbH.
+ * Copyright 2008-2018 Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -33,6 +33,7 @@
 #define WRKTHRD_STOPPED  	0
 #define WRKTHRD_INITIALIZING	1
 #define WRKTHRD_RUNNING		3
+#define WRKTHRD_WAIT_JOIN	7
 
 
 /* possible states of a worker thread pool */
@@ -75,11 +76,14 @@ struct wtp_s {
 /* some symbolic constants for easier reference */
 
 
+#define DENY_WORKER_START_DURING_SHUTDOWN	0
+#define PERMIT_WORKER_START_DURING_SHUTDOWN	1
+
 /* prototypes */
 rsRetVal wtpConstruct(wtp_t **ppThis);
 rsRetVal wtpConstructFinalize(wtp_t *pThis);
 rsRetVal wtpDestruct(wtp_t **ppThis);
-rsRetVal wtpAdviseMaxWorkers(wtp_t *pThis, int nMaxWrkr);
+rsRetVal wtpAdviseMaxWorkers(wtp_t *pThis, int nMaxWrkr, const int permit_during_shutdown);
 rsRetVal wtpProcessThrdChanges(wtp_t *pThis);
 rsRetVal wtpChkStopWrkr(wtp_t *pThis, int bLockUsrMutex);
 rsRetVal wtpSetState(wtp_t *pThis, wtpState_t iNewState);

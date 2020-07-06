@@ -16,11 +16,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -69,7 +69,7 @@ BEGINobjConstruct(tcps_sess) /* be sure to specify the object type also in END m
 		pThis->inputState = eAtStrtFram; /* indicate frame header expected */
 		pThis->eFraming = TCP_FRAMING_OCTET_STUFFING; /* just make sure... */
 		/* now allocate the message reception buffer */
-		CHKmalloc(pThis->pMsg = (uchar*) MALLOC(glbl.GetMaxLine() + 1));
+		CHKmalloc(pThis->pMsg = (uchar*) malloc(glbl.GetMaxLine() + 1));
 finalize_it:
 ENDobjConstruct(tcps_sess)
 
@@ -93,7 +93,6 @@ finalize_it:
 /* destructor for the tcps_sess object */
 BEGINobjDestruct(tcps_sess) /* be sure to specify the object type also in END and CODESTART macros! */
 CODESTARTobjDestruct(tcps_sess)
-//printf("sess %p destruct, pStrm %p\n", pThis, pThis->pStrm);
 	if(pThis->pStrm != NULL)
 		netstrm.Destruct(&pThis->pStrm);
 
@@ -223,7 +222,7 @@ SetOnMsgReceive(tcps_sess_t *pThis, rsRetVal (*OnMsgReceive)(tcps_sess_t*, uchar
  * It does some common processing, including resetting the various
  * state variables to a "processed" state.
  * Note that this function is also called if we had a buffer overflow
- * due to a too-long message. So far, there is no indication this 
+ * due to a too-long message. So far, there is no indication this
  * happened and it may be worth thinking about different handling
  * of this case (what obviously would require a change to this
  * function or some related code).
@@ -331,7 +330,6 @@ Close(tcps_sess_t *pThis)
 {
 	DEFiRet;
 
-//printf("sess %p close\n", pThis);
 	ISOBJ_TYPE_assert(pThis, tcps_sess);
 	netstrm.Destruct(&pThis->pStrm);
 	if(pThis->fromHost != NULL) {
@@ -350,9 +348,9 @@ Close(tcps_sess_t *pThis)
  * the end result to the queue. Introducing this function fixes a long-term bug ;)
  * rgerhards, 2008-03-14
  */
-static rsRetVal
+static rsRetVal ATTR_NONNULL(1)
 processDataRcvd(tcps_sess_t *pThis,
-	char c,
+	const char c,
 	struct syslogTime *stTime,
 	const time_t ttGenTime,
 	multi_submit_t *pMultiSub,
@@ -426,29 +424,26 @@ processDataRcvd(tcps_sess_t *pThis,
 			pThis->inputState = eInMsg;
 		}
 	} else if(pThis->inputState == eInMsgTruncating) {
-		if((   ((c == '\n') && !pThis->pSrv->bDisableLFDelim)
-		   || ((pThis->pSrv->addtlFrameDelim != TCPSRV_NO_ADDTL_DELIMITER)
-		        && (c == pThis->pSrv->addtlFrameDelim))
-		   ) && pThis->eFraming == TCP_FRAMING_OCTET_STUFFING) {
-			pThis->inputState = eAtStrtFram;
+		if(pThis->eFraming == TCP_FRAMING_OCTET_COUNTING) {
+			DBGPRINTF("DEBUG: TCP_FRAMING_OCTET_COUNTING eInMsgTruncating c=%c remain=%d\n",
+				c, pThis->iOctetsRemain);
+
+			pThis->iOctetsRemain--;
+			if(pThis->iOctetsRemain < 1) {
+				pThis->inputState = eAtStrtFram;
+			}
+		} else {
+			if(    ((c == '\n') && !pThis->pSrv->bDisableLFDelim)
+			    || ((pThis->pSrv->addtlFrameDelim != TCPSRV_NO_ADDTL_DELIMITER)
+			         && (c == pThis->pSrv->addtlFrameDelim))
+			    ) {
+				pThis->inputState = eAtStrtFram;
+			}
 		}
 	} else {
 		assert(pThis->inputState == eInMsg);
-		if(pThis->iMsg >= iMaxLine) {
-			/* emergency, we now need to flush, no matter if we are at end of message or not... */
-			DBGPRINTF("error: message received is larger than max msg size, we split it\n");
-			defaultDoSubmitMessage(pThis, stTime, ttGenTime, pMultiSub);
-			++(*pnMsgs);
-			if(pThis->pSrv->discardTruncatedMsg == 1) {
-				pThis->inputState = eInMsgTruncating;
-			}
-			/* configuration parameter discardTruncatedMsg controlls
-			 * if rest of message is being processed
-			 * 0 = off
-			 * 1 = on
-			 * Pascal Withopf, 2017-04-21
-			 */
-		}
+		DBGPRINTF("DEBUG: processDataRcvd c=%c remain=%d\n",
+			c, pThis->iOctetsRemain);
 
 		if((   ((c == '\n') && !pThis->pSrv->bDisableLFDelim)
 		   || ((pThis->pSrv->addtlFrameDelim != TCPSRV_NO_ADDTL_DELIMITER)
@@ -464,6 +459,23 @@ processDataRcvd(tcps_sess_t *pThis,
 			 */
 			if(pThis->iMsg < iMaxLine) {
 				*(pThis->pMsg + pThis->iMsg++) = c;
+			} else {
+				/* emergency, we now need to flush, no matter if we are at end of message or not... */
+				DBGPRINTF("error: message received is larger than max msg size, we %s it - c=%x\n",
+					pThis->pSrv->discardTruncatedMsg == 1 ? "truncate" : "split", c);
+				defaultDoSubmitMessage(pThis, stTime, ttGenTime, pMultiSub);
+				++(*pnMsgs);
+				if(pThis->pSrv->discardTruncatedMsg == 1) {
+					if (pThis->eFraming == TCP_FRAMING_OCTET_COUNTING) {
+						pThis->iOctetsRemain--;
+						if (pThis->iOctetsRemain == 0) {
+							pThis->inputState = eAtStrtFram;
+							FINALIZE;
+						}
+					}
+					pThis->inputState = eInMsgTruncating;
+					FINALIZE;
+				}
 			}
 		}
 

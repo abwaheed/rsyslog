@@ -16,7 +16,7 @@
  *
  * File begun on 2008-03-13 by RGerhards
  *
- * Copyright 2008-2016 Adiscon GmbH.
+ * Copyright 2008-2019 Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -52,6 +52,7 @@
 #include "glbl.h"
 #include "errmsg.h"
 #include "debug.h"
+#include "parserif.h"
 #include "unicode-helper.h"
 
 #ifndef RELP_DFLT_PT
@@ -65,7 +66,6 @@ MODULE_CNFNAME("omrelp")
 /* internal structures
  */
 DEF_OMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(glbl)
 
 #define DFLT_ENABLE_TLS 0
@@ -88,6 +88,9 @@ typedef struct _instanceData {
 	uchar *caCertFile;
 	uchar *myCertFile;
 	uchar *myPrivKeyFile;
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+	uchar *tlscfgcmd;
+#endif
 	uchar *tplName;
 	uchar *localClientIP;
 	struct {
@@ -100,6 +103,7 @@ typedef struct wrkrInstanceData {
 	instanceData *pData;
 	int bInitialConnect; /* is this the initial connection request of our module? (0-no, 1-yes) */
 	int bIsConnected; /* currently connected to server? 0 - no, 1 - yes */
+	int bIsSuspended; /* currently suspended (than no more error messages) */
 	relpClt_t *pRelpClt; /* relp client for this instance */
 	unsigned nSent; /* number msgs sent - for rebind support */
 } wrkrInstanceData_t;
@@ -109,9 +113,26 @@ typedef struct configSettings_s {
 } configSettings_t;
 static configSettings_t __attribute__((unused)) cs;
 
-static rsRetVal doCreateRelpClient(wrkrInstanceData_t *pWrkrData);
+static rsRetVal doCreateRelpClient(instanceData *pData, relpClt_t **pRelpClt);
+
+struct modConfData_s {
+	rsconf_t *pConf;	/* our overall config object */
+	const char  *tlslib;
+};
+
+static modConfData_t *loadModConf = NULL;/* modConf ptr to use for the current load process */
+static modConfData_t *runModConf = NULL;/* modConf ptr to use for the current exec process */
 
 /* tables for interfacing with the v6 config system */
+/* module-global parameters */
+static struct cnfparamdescr modpdescr[] = {
+	{ "tls.tlslib", eCmdHdlrString, 0 }
+};
+static struct cnfparamblk modpblk =
+	{ CNFPARAMBLK_VERSION,
+	  sizeof(modpdescr)/sizeof(struct cnfparamdescr),
+	  modpdescr
+	};
 /* action (instance) parameters */
 static struct cnfparamdescr actpdescr[] = {
 	{ "target", eCmdHdlrGetWord, 1 },
@@ -122,6 +143,7 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "tls.mycert", eCmdHdlrString, 0 },
 	{ "tls.myprivkey", eCmdHdlrString, 0 },
 	{ "tls.authmode", eCmdHdlrString, 0 },
+	{ "tls.tlscfgcmd", eCmdHdlrString, 0 },
 	{ "tls.permittedpeer", eCmdHdlrArray, 0 },
 	{ "port", eCmdHdlrGetWord, 0 },
 	{ "rebindinterval", eCmdHdlrInt, 0 },
@@ -146,9 +168,8 @@ ENDinitConfVars
  * is not a really bright idea, but kept for backward compatibility).
  */
 
-#if !defined(_AIX)
-#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-#endif
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_IGNORE_Wformat_nonliteral
 static void __attribute__((format(printf, 1, 2)))
 omrelp_dbgprintf(const char *fmt, ...)
 {
@@ -165,9 +186,7 @@ omrelp_dbgprintf(const char *fmt, ...)
 	va_end(ap);
 	r_dbgprintf("omrelp.c", "%s", pszWriteBuf);
 }
-#if !defined(_AIX)
-#pragma GCC diagnostic warning "-Wformat-nonliteral"
-#endif
+PRAGMA_DIAGNOSTIC_POP
 
 
 static uchar *getRelpPt(instanceData *pData)
@@ -183,7 +202,7 @@ static void
 onErr(void *pUsr, char *objinfo, char* errmesg, __attribute__((unused)) relpRetVal errcode)
 {
 	wrkrInstanceData_t *pWrkrData = (wrkrInstanceData_t*) pUsr;
-	errmsg.LogError(0, RS_RET_RELP_AUTH_FAIL, "omrelp[%s:%s]: error '%s', object "
+	LogError(0, RS_RET_RELP_AUTH_FAIL, "omrelp[%s:%s]: error '%s', object "
 			" '%s' - action may not work as intended",
 			pWrkrData->pData->target, pWrkrData->pData->port, errmesg, objinfo);
 }
@@ -191,7 +210,7 @@ onErr(void *pUsr, char *objinfo, char* errmesg, __attribute__((unused)) relpRetV
 static void
 onGenericErr(char *objinfo, char* errmesg, __attribute__((unused)) relpRetVal errcode)
 {
-	errmsg.LogError(0, RS_RET_RELP_ERR, "omrelp: librelp error '%s', object "
+	LogError(0, RS_RET_RELP_ERR, "omrelp: librelp error '%s', object "
 			"'%s' - action may not work as intended",
 			errmesg, objinfo);
 }
@@ -200,63 +219,86 @@ static void
 onAuthErr(void *pUsr, char *authinfo, char* errmesg, __attribute__((unused)) relpRetVal errcode)
 {
 	instanceData *pData = ((wrkrInstanceData_t*) pUsr)->pData;
-	errmsg.LogError(0, RS_RET_RELP_AUTH_FAIL, "omrelp[%s:%s]: authentication error '%s', peer "
+	LogError(0, RS_RET_RELP_AUTH_FAIL, "omrelp[%s:%s]: authentication error '%s', peer "
 			"is '%s' - DISABLING action", pData->target, pData->port, errmesg, authinfo);
 	pData->bHadAuthFail = 1;
 }
 
 static rsRetVal
-doCreateRelpClient(wrkrInstanceData_t *pWrkrData)
+doCreateRelpClient(instanceData *pData, relpClt_t **pRelpClt)
 {
 	int i;
-	instanceData *pData;
 	DEFiRet;
 
-	pData = pWrkrData->pData;
-	if(relpEngineCltConstruct(pRelpEngine, &pWrkrData->pRelpClt) != RELP_RET_OK)
+	if(relpEngineCltConstruct(pRelpEngine, pRelpClt) != RELP_RET_OK)
 		ABORT_FINALIZE(RS_RET_RELP_ERR);
-	if(relpCltSetTimeout(pWrkrData->pRelpClt, pData->timeout) != RELP_RET_OK)
+	if(relpCltSetTimeout(*pRelpClt, pData->timeout) != RELP_RET_OK)
 		ABORT_FINALIZE(RS_RET_RELP_ERR);
-	if(relpCltSetConnTimeout(pWrkrData->pRelpClt, pData->connTimeout) != RELP_RET_OK) {
+	if(relpCltSetConnTimeout(*pRelpClt, pData->connTimeout) != RELP_RET_OK) {
 		ABORT_FINALIZE(RS_RET_RELP_ERR);
 	}
-	if(relpCltSetWindowSize(pWrkrData->pRelpClt, pData->sizeWindow) != RELP_RET_OK)
-		ABORT_FINALIZE(RS_RET_RELP_ERR);
-	if(relpCltSetUsrPtr(pWrkrData->pRelpClt, pWrkrData) != RELP_RET_OK)
+	if(relpCltSetWindowSize(*pRelpClt, pData->sizeWindow) != RELP_RET_OK)
 		ABORT_FINALIZE(RS_RET_RELP_ERR);
 	if(pData->bEnableTLS) {
-		if(relpCltEnableTLS(pWrkrData->pRelpClt) != RELP_RET_OK)
+		if(relpCltEnableTLS(*pRelpClt) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
 		if(pData->bEnableTLSZip) {
-			if(relpCltEnableTLSZip(pWrkrData->pRelpClt) != RELP_RET_OK)
+			if(relpCltEnableTLSZip(*pRelpClt) != RELP_RET_OK)
 				ABORT_FINALIZE(RS_RET_RELP_ERR);
 		}
-		if(relpCltSetGnuTLSPriString(pWrkrData->pRelpClt, (char*) pData->pristring) != RELP_RET_OK)
+		if(relpCltSetGnuTLSPriString(*pRelpClt, (char*) pData->pristring) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
-		if(relpCltSetAuthMode(pWrkrData->pRelpClt, (char*) pData->authmode) != RELP_RET_OK) {
-			errmsg.LogError(0, RS_RET_RELP_ERR,
+
+
+		if(relpCltSetAuthMode(*pRelpClt, (char*) pData->authmode) != RELP_RET_OK) {
+			LogError(0, RS_RET_RELP_ERR,
 					"omrelp: invalid auth mode '%s'\n", pData->authmode);
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
 		}
-		if(relpCltSetCACert(pWrkrData->pRelpClt, (char*) pData->caCertFile) != RELP_RET_OK)
+
+		if(relpCltSetCACert(*pRelpClt, (char*) pData->caCertFile) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
-		if(relpCltSetOwnCert(pWrkrData->pRelpClt, (char*) pData->myCertFile) != RELP_RET_OK)
+		if(relpCltSetOwnCert(*pRelpClt, (char*) pData->myCertFile) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
-		if(relpCltSetPrivKey(pWrkrData->pRelpClt, (char*) pData->myPrivKeyFile) != RELP_RET_OK)
+		if(relpCltSetPrivKey(*pRelpClt, (char*) pData->myPrivKeyFile) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+		if (pData->tlscfgcmd != NULL) {
+			if(relpCltSetTlsConfigCmd(*pRelpClt, (char*) pData->tlscfgcmd) != RELP_RET_OK)
+				ABORT_FINALIZE(RS_RET_RELP_ERR);
+		}
+#endif
 		for(i = 0 ; i <  pData->permittedPeers.nmemb ; ++i) {
-			relpCltAddPermittedPeer(pWrkrData->pRelpClt, (char*)pData->permittedPeers.name[i]);
+			relpCltAddPermittedPeer(*pRelpClt, (char*)pData->permittedPeers.name[i]);
 		}
 	}
 	if(pData->localClientIP != NULL) {
-		if(relpCltSetClientIP(pWrkrData->pRelpClt, pData->localClientIP) != RELP_RET_OK)
+		if(relpCltSetClientIP(*pRelpClt, pData->localClientIP) != RELP_RET_OK)
 			ABORT_FINALIZE(RS_RET_RELP_ERR);
 	}
-	pWrkrData->bInitialConnect = 1;
-	pWrkrData->nSent = 0;
 finalize_it:
+
 	RETiRet;
 }
+
+BEGINendCnfLoad
+CODESTARTendCnfLoad
+	loadModConf = NULL;
+	runModConf = pModConf;
+ENDendCnfLoad
+
+BEGINcheckCnf
+CODESTARTcheckCnf
+ENDcheckCnf
+
+BEGINactivateCnf
+CODESTARTactivateCnf
+ENDactivateCnf
+
+BEGINfreeCnf
+CODESTARTfreeCnf
+	free((void*)pModConf->tlslib);
+ENDfreeCnf
 
 BEGINcreateInstance
 CODESTARTcreateInstance
@@ -273,13 +315,20 @@ CODESTARTcreateInstance
 	pData->caCertFile = NULL;
 	pData->myCertFile = NULL;
 	pData->myPrivKeyFile = NULL;
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+	pData->tlscfgcmd = NULL;
+#endif
 	pData->permittedPeers.nmemb = 0;
 ENDcreateInstance
 
 BEGINcreateWrkrInstance
 CODESTARTcreateWrkrInstance
 	pWrkrData->pRelpClt = NULL;
-	iRet = doCreateRelpClient(pWrkrData);
+	iRet = doCreateRelpClient(pWrkrData->pData, &pWrkrData->pRelpClt);
+	if(relpCltSetUsrPtr(pWrkrData->pRelpClt, pWrkrData) != RELP_RET_OK)
+		LogError(0, RS_RET_NO_ERRCODE, "omrelp: error when creating relp client");
+	pWrkrData->bInitialConnect = 1;
+	pWrkrData->nSent = 0;
 ENDcreateWrkrInstance
 
 BEGINfreeInstance
@@ -294,6 +343,9 @@ CODESTARTfreeInstance
 	free(pData->caCertFile);
 	free(pData->myCertFile);
 	free(pData->myPrivKeyFile);
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+	free(pData->tlscfgcmd);
+#endif
 	if(pData->permittedPeers.name != NULL) {
 		for(i = 0 ; i <  pData->permittedPeers.nmemb ; ++i) {
 			free(pData->permittedPeers.name[i]);
@@ -328,15 +380,74 @@ setInstParamDefaults(instanceData *pData)
 	pData->caCertFile = NULL;
 	pData->myCertFile = NULL;
 	pData->myPrivKeyFile = NULL;
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+	pData->tlscfgcmd = NULL;
+#endif
 	pData->permittedPeers.name = NULL;
 	pData->permittedPeers.nmemb = 0;
 }
 
+BEGINbeginCnfLoad
+CODESTARTbeginCnfLoad
+	loadModConf = pModConf;
+	pModConf->tlslib = NULL;
+	/* create our relp engine */
+	CHKiRet(relpEngineConstruct(&pRelpEngine));
+	CHKiRet(relpEngineSetDbgprint(pRelpEngine, (void (*)(char *, ...))omrelp_dbgprintf));
+	CHKiRet(relpEngineSetOnAuthErr(pRelpEngine, onAuthErr));
+	CHKiRet(relpEngineSetOnGenericErr(pRelpEngine, onGenericErr));
+	CHKiRet(relpEngineSetOnErr(pRelpEngine, onErr));
+	CHKiRet(relpEngineSetEnableCmd(pRelpEngine, (uchar*) "syslog", eRelpCmdState_Required));
+finalize_it:
+ENDbeginCnfLoad
+
+BEGINsetModCnf
+	struct cnfparamvals *pvals = NULL;
+	int i;
+CODESTARTsetModCnf
+	pvals = nvlstGetParams(lst, &modpblk, NULL);
+	if(pvals == NULL) {
+		parser_errmsg("imrelp: error processing module config parameters [module(...)]");
+		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
+	}
+
+	if(Debug) {
+		dbgprintf("module (global) param blk for omrelp:\n");
+		cnfparamsPrint(&modpblk, pvals);
+	}
+
+	for(i = 0 ; i < modpblk.nParams ; ++i) {
+		if(!pvals[i].bUsed) {
+			continue;
+		}
+		if(!strcmp(modpblk.descr[i].name, "tls.tlslib")) {
+			#if defined(HAVE_RELPENGINESETTLSLIBBYNAME)
+				loadModConf->tlslib = es_str2cstr(pvals[i].val.d.estr, NULL);
+				if(relpEngineSetTLSLibByName(pRelpEngine, loadModConf->tlslib) != RELP_RET_OK) {
+					LogMsg(0, RS_RET_CONF_PARAM_INVLD, LOG_WARNING,
+						"omrelp: tlslib '%s' not accepted as valid by librelp - using default",
+						loadModConf->tlslib);
+				}
+			#else
+				LogError(0, RS_RET_NOT_IMPLEMENTED,
+					"omrelp warning: parameter tls.tlslib ignored - librelp does not support "
+					"this API call. Using whatever librelp was compiled with.");
+			#endif
+		} else {
+			dbgprintf("imfile: program error, non-handled "
+			  "param '%s' in beginCnfLoad\n", modpblk.descr[i].name);
+		}
+	}
+finalize_it:
+	if(pvals != NULL)
+		cnfparamvalsDestruct(pvals, &modpblk);
+ENDsetModCnf
 
 BEGINnewActInst
 	struct cnfparamvals *pvals;
 	int i,j;
 	FILE *fp;
+	relpClt_t *pRelpClt = NULL;
 CODESTARTnewActInst
 	if((pvals = nvlstGetParams(lst, &actpblk, NULL)) == NULL) {
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
@@ -376,7 +487,7 @@ CODESTARTnewActInst
 			if(fp == NULL) {
 				char errStr[1024];
 				rs_strerror_r(errno, errStr, sizeof(errStr));
-				errmsg.LogError(0, RS_RET_NO_FILE_ACCESS,
+				LogError(0, RS_RET_NO_FILE_ACCESS,
 				"error: certificate file %s couldn't be accessed: %s\n",
 				pData->caCertFile, errStr);
 			} else {
@@ -388,7 +499,7 @@ CODESTARTnewActInst
 			if(fp == NULL) {
 				char errStr[1024];
 				rs_strerror_r(errno, errStr, sizeof(errStr));
-				errmsg.LogError(0, RS_RET_NO_FILE_ACCESS,
+				LogError(0, RS_RET_NO_FILE_ACCESS,
 				"error: certificate file %s couldn't be accessed: %s\n",
 				pData->myCertFile, errStr);
 			} else {
@@ -400,21 +511,22 @@ CODESTARTnewActInst
 			if(fp == NULL) {
 				char errStr[1024];
 				rs_strerror_r(errno, errStr, sizeof(errStr));
-				errmsg.LogError(0, RS_RET_NO_FILE_ACCESS,
+				LogError(0, RS_RET_NO_FILE_ACCESS,
 				"error: certificate file %s couldn't be accessed: %s\n",
 				pData->myPrivKeyFile, errStr);
 			} else {
 				fclose(fp);
 			}
+		} else if(!strcmp(actpblk.descr[i].name, "tls.tlscfgcmd")) {
+#if defined(HAVE_RELPENGINESETTLSCFGCMD)
+			pData->tlscfgcmd = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+#else
+			LogError(0, RS_RET_NOT_IMPLEMENTED, "omrelp: librelp does not support input parameter "
+				"'tls.tlscfgcmd'; it probably is too old (1.5.0 or higher should be fine); "
+				"ignoring setting now.");
+#endif
 		} else if(!strcmp(actpblk.descr[i].name, "tls.authmode")) {
-			char *authMode = es_str2cstr(pvals[i].val.d.estr, NULL);
-			if(!strcmp(authMode, "name") || !strcmp(authMode, "fingerprint")) {
-				pData->authmode = (uchar*)authMode;
-			} else {
-				errmsg.LogError(0, RS_RET_INVALID_PARAMS,
-						"omrelp error: invalid authmode: %s\n",
-						authMode);
-			}
+			pData->authmode = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "tls.permittedpeer")) {
 			pData->permittedPeers.nmemb = pvals[i].val.d.ar->nmemb;
 			CHKmalloc(pData->permittedPeers.name =
@@ -427,12 +539,16 @@ CODESTARTnewActInst
 			  "param '%s'\n", actpblk.descr[i].name);
 		}
 	}
-	
+
 	CODE_STD_STRING_REQUESTnewActInst(1)
 
 	CHKiRet(OMSRsetEntry(*ppOMSR, 0, (uchar*)strdup((pData->tplName == NULL) ?
 			    "RSYSLOG_ForwardFormat" : (char*)pData->tplName),
 	   		    OMSR_NO_RQD_TPL_OPTS));
+
+	iRet = doCreateRelpClient(pData, &pRelpClt);
+	if(pRelpClt != NULL)
+		relpEngineCltDestruct(pRelpEngine, &pRelpClt);
 
 CODE_STD_FINALIZERnewActInst
 	if(pvals != NULL)
@@ -478,19 +594,23 @@ doConnect(wrkrInstanceData_t *const pWrkrData)
 	if(iRet == RELP_RET_OK) {
 		pWrkrData->bIsConnected = 1;
 	} else if(iRet == RELP_RET_ERR_NO_TLS) {
-		errmsg.LogError(0, iRet, "omrelp: Could not connect, librelp does NOT "
-				"does not support TLS (most probably GnuTLS lib "
+		LogError(0, iRet, "omrelp: Could not connect, librelp does NOT "
+				"support TLS (most probably GnuTLS lib "
 				"is too old)!");
 		FINALIZE;
 	} else if(iRet == RELP_RET_ERR_NO_TLS_AUTH) {
-		errmsg.LogError(0, iRet,
-				"omrelp: could not activate relp TLS with "
+		LogError(0, iRet, "omrelp: could not activate relp TLS with "
 				"authentication, librelp does not support it "
 				"(most probably GnuTLS lib is too old)! "
 				"Note: anonymous TLS is probably supported.");
 		FINALIZE;
 	} else {
+		if(pWrkrData->bIsSuspended == 0) {
+			LogError(0, RS_RET_RELP_ERR, "omrelp: could not connect to "
+				"remote server, librelp error %d", iRet);
+		}
 		pWrkrData->bIsConnected = 0;
+		pWrkrData->bIsSuspended = 1;
 		iRet = RS_RET_SUSPENDED;
 	}
 
@@ -515,7 +635,11 @@ doRebind(wrkrInstanceData_t *pWrkrData)
 	DBGPRINTF("omrelp: destructing relp client due to rebindInterval\n");
 	CHKiRet(relpEngineCltDestruct(pRelpEngine, &pWrkrData->pRelpClt));
 	pWrkrData->bIsConnected = 0;
-	CHKiRet(doCreateRelpClient(pWrkrData));
+	CHKiRet(doCreateRelpClient(pWrkrData->pData, &pWrkrData->pRelpClt));
+	if(relpCltSetUsrPtr(pWrkrData->pRelpClt, pWrkrData) != RELP_RET_OK)
+		LogError(0, RS_RET_NO_ERRCODE, "omrelp: error when creating relp client");
+	pWrkrData->bInitialConnect = 1;
+	pWrkrData->nSent = 0;
 finalize_it:
 	RETiRet;
 }
@@ -553,8 +677,11 @@ CODESTARTdoAction
 	/* forward */
 	ret = relpCltSendSyslog(pWrkrData->pRelpClt, (uchar*) pMsg, lenMsg);
 	if(ret != RELP_RET_OK) {
-		/* error! */
-		dbgprintf("error forwarding via relp, suspending\n");
+		LogError(0, RS_RET_RELP_ERR, "librelp error %d%s forwarding "
+				"to server %s:%s - suspending\n", ret,
+				(ret == RELP_RET_SESSION_BROKEN) ?
+					"[connection broken]" : "",
+				pData->target, getRelpPt(pData));
 		ABORT_FINALIZE(RS_RET_SUSPENDED);
 	}
 
@@ -572,6 +699,8 @@ finalize_it:
 		 * rsyslog generally accepts and prefers over message loss.
 		 */
 		iRet = RS_RET_PREVIOUS_COMMITTED;
+	} else if(iRet == RS_RET_SUSPENDED) {
+		pWrkrData->bIsSuspended = 1;
 	}
 ENDdoAction
 
@@ -624,9 +753,9 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 		tmp = ++p;
 		for(i=0 ; *p && isdigit((int) *p) ; ++p, ++i)
 			/* SKIP AND COUNT */;
-		pData->port = MALLOC(i + 1);
+		pData->port = malloc(i + 1);
 		if(pData->port == NULL) {
-			errmsg.LogError(0, NO_ERRCODE, "Could not get memory to store relp port, "
+			LogError(0, NO_ERRCODE, "Could not get memory to store relp port, "
 				 "using default port, results may not be what you intend\n");
 			/* we leave f_forw.port set to NULL, this is then handled by getRelpPt() */
 		} else {
@@ -634,7 +763,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 			*(pData->port + i) = '\0';
 		}
 	}
-	
+
 	/* now skip to template */
 	bErr = 0;
 	while(*p && *p != ';') {
@@ -642,7 +771,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 			if(bErr == 0) { /* only 1 error msg! */
 				bErr = 1;
 				errno = 0;
-				errmsg.LogError(0, NO_ERRCODE, "invalid selector line (port), probably not doing "
+				LogError(0, NO_ERRCODE, "invalid selector line (port), probably not doing "
 					 "what was intended");
 			}
 		}
@@ -670,7 +799,6 @@ CODESTARTmodExit
 
 	/* release what we no longer need */
 	objRelease(glbl, CORE_COMPONENT);
-	objRelease(errmsg, CORE_COMPONENT);
 ENDmodExit
 
 
@@ -678,8 +806,10 @@ BEGINqueryEtryPt
 CODESTARTqueryEtryPt
 CODEqueryEtryPt_STD_OMOD_QUERIES
 CODEqueryEtryPt_STD_OMOD8_QUERIES
+CODEqueryEtryPt_STD_CONF2_QUERIES
 CODEqueryEtryPt_STD_CONF2_CNFNAME_QUERIES
 CODEqueryEtryPt_STD_CONF2_OMOD_QUERIES
+CODEqueryEtryPt_STD_CONF2_setModCnf_QUERIES
 CODEqueryEtryPt_TXIF_OMOD_QUERIES
 CODEqueryEtryPt_SetShutdownImmdtPtr
 ENDqueryEtryPt
@@ -690,15 +820,6 @@ CODESTARTmodInit
 INITLegCnfVars
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
-	/* create our relp engine */
-	CHKiRet(relpEngineConstruct(&pRelpEngine));
-	CHKiRet(relpEngineSetDbgprint(pRelpEngine, (void (*)(char *, ...))omrelp_dbgprintf));
-	CHKiRet(relpEngineSetOnAuthErr(pRelpEngine, onAuthErr));
-	CHKiRet(relpEngineSetOnGenericErr(pRelpEngine, onGenericErr));
-	CHKiRet(relpEngineSetOnErr(pRelpEngine, onErr));
-	CHKiRet(relpEngineSetEnableCmd(pRelpEngine, (uchar*) "syslog", eRelpCmdState_Required));
-
 	/* tell which objects we need */
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(glbl, CORE_COMPONENT));
 ENDmodInit

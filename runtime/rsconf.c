@@ -2,18 +2,18 @@
  *
  * Module begun 2011-04-19 by Rainer Gerhards
  *
- * Copyright 2011-2018 Adiscon GmbH.
+ * Copyright 2011-2020 Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -111,6 +111,9 @@ static uchar template_StdJSONFmt[] = "\"{\\\"message\\\":\\\"%msg:::json%\\\",\\
 "%HOSTNAME:::json%\\\",\\\"facility\\\":\\\"%syslogfacility-text%\\\",\\\"priority\\\":\\\""
 "%syslogpriority-text%\\\",\\\"timereported\\\":\\\"%timereported:::date-rfc3339%\\\",\\\"timegenerated\\\":\\\""
 "%timegenerated:::date-rfc3339%\\\"}\"";
+static uchar template_StdClickHouseFmt[] = "\"INSERT INTO rsyslog.SystemEvents (severity, facility, "
+"timestamp, hostname, tag, message) VALUES (%syslogseverity%, %syslogfacility%, "
+"'%timereported:::date-unixtimestamp%', '%hostname%', '%syslogtag%', '%msg%')\",STDSQL";
 /* end templates */
 
 /* tables for interfacing with the v6 config system (as far as we need to) */
@@ -153,6 +156,7 @@ static void cnfSetDefaults(rsconf_t *pThis)
 	pThis->globals.maxErrMsgToStderr = -1;
 	pThis->globals.umask = -1;
 	pThis->globals.gidDropPrivKeepSupplemental = 0;
+	pThis->globals.abortOnIDResolutionFail = 1;
 	pThis->templates.root = NULL;
 	pThis->templates.last = NULL;
 	pThis->templates.lastStatic = NULL;
@@ -282,7 +286,7 @@ BEGINobjDebugPrint(rsconf) /* be sure to specify the object type also in END and
 	/* TODO: add
 	iActionRetryCount = 0;
 	iActionRetryInterval = 30000;
-       static int iMainMsgQtoWrkMinMsgs = 100;
+	static int iMainMsgQtoWrkMinMsgs = 100;
 	static int iMainMsgQbSaveOnShutdown = 1;
 	iMainMsgQueMaxDiskSpace = 0;
 	setQPROP(qqueueSetiMinMsgsPerWrkr, "$MainMsgQueueWorkerThreadMinimumMessages", 100);
@@ -320,7 +324,7 @@ parserProcessCnf(struct cnfobj *o)
 	parserName = (uchar*)es_str2cstr(pvals[paramIdx].val.d.estr, NULL);
 	if(parser.FindParser(&myparser, parserName) != RS_RET_PARSER_NOT_FOUND) {
 		LogError(0, RS_RET_PARSER_NAME_EXISTS,
-			"parser module name '%s' already exists", cnfModName);
+			"parser module name '%s' already exists", parserName);
 		ABORT_FINALIZE(RS_RET_PARSER_NAME_EXISTS);
 	}
 
@@ -435,6 +439,16 @@ cnfDoObj(struct cnfobj *const o)
 
 	dbgprintf("cnf:global:obj: ");
 	cnfobjPrint(o);
+
+	/* We need to check for object disabling as early as here to cover most
+	 * of them at once and avoid needless initializations
+	 * - jvymazal 2020-02-12
+	 */
+	if (nvlstChkDisabled(o->nvlst)) {
+		dbgprintf("object disabled by configuration\n");
+		return;
+	}
+
 	switch(o->objType) {
 	case CNFOBJ_GLOBAL:
 		glblProcessCnf(o);
@@ -505,7 +519,7 @@ void cnfDoBSDTag(char *ln)
 	DBGPRINTF("cnf:global:BSD tag: %s\n", ln);
 	LogError(0, RS_RET_BSD_BLOCKS_UNSUPPORTED,
 			"BSD-style blocks are no longer supported in rsyslog, "
-			"see http://www.rsyslog.com/g/BSD for details and a "
+			"see https://www.rsyslog.com/g/BSD for details and a "
 			"solution (Block '%s')", ln);
 	free(ln);
 }
@@ -515,7 +529,7 @@ void cnfDoBSDHost(char *ln)
 	DBGPRINTF("cnf:global:BSD host: %s\n", ln);
 	LogError(0, RS_RET_BSD_BLOCKS_UNSUPPORTED,
 			"BSD-style blocks are no longer supported in rsyslog, "
-			"see http://www.rsyslog.com/g/BSD for details and a "
+			"see https://www.rsyslog.com/g/BSD for details and a "
 			"solution (Block '%s')", ln);
 	free(ln);
 }
@@ -578,7 +592,7 @@ static void doDropPrivUid(int iUid)
 	if (pw) {
 		gid = getgid();
 		res = initgroups(pw->pw_name, gid);
-		DBGPRINTF("initgroups(%s, %d): %d\n", pw->pw_name, gid, res);
+		DBGPRINTF("initgroups(%s, %ld): %d\n", pw->pw_name, (long) gid, res);
 	} else {
 		rs_strerror_r(errno, (char*)szBuf, sizeof(szBuf));
 		LogError(0, NO_ERRCODE,
@@ -610,13 +624,13 @@ dropPrivileges(rsconf_t *cnf)
 
 	if(cnf->globals.gidDropPriv != 0) {
 		CHKiRet(doDropPrivGid());
-		DBGPRINTF("group privileges have been dropped to gid %u\n", (unsigned) 
+		DBGPRINTF("group privileges have been dropped to gid %u\n", (unsigned)
 			  ourConf->globals.gidDropPriv);
 	}
 
 	if(cnf->globals.uidDropPriv != 0) {
 		doDropPrivUid(ourConf->globals.uidDropPriv);
-		DBGPRINTF("user privileges have been dropped to uid %u\n", (unsigned) 
+		DBGPRINTF("user privileges have been dropped to uid %u\n", (unsigned)
 			  ourConf->globals.uidDropPriv);
 	}
 
@@ -642,7 +656,6 @@ tellModulesConfigLoadDone(void)
 {
 	cfgmodules_etry_t *node;
 
-	BEGINfunc
 	DBGPRINTF("telling modules that config load for %p is done\n", loadConf);
 	node = module.GetNxtCnfType(loadConf, NULL, eMOD_ANY);
 	while(node != NULL) {
@@ -654,7 +667,6 @@ tellModulesConfigLoadDone(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_ANY);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -666,7 +678,6 @@ tellModulesCheckConfig(void)
 	cfgmodules_etry_t *node;
 	rsRetVal localRet;
 
-	BEGINfunc
 	DBGPRINTF("telling modules to check config %p\n", loadConf);
 	node = module.GetNxtCnfType(loadConf, NULL, eMOD_ANY);
 	while(node != NULL) {
@@ -683,7 +694,6 @@ tellModulesCheckConfig(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_ANY);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -695,7 +705,6 @@ tellModulesActivateConfigPrePrivDrop(void)
 	cfgmodules_etry_t *node;
 	rsRetVal localRet;
 
-	BEGINfunc
 	DBGPRINTF("telling modules to activate config (before dropping privs) %p\n", runConf);
 	node = module.GetNxtCnfType(runConf, NULL, eMOD_ANY);
 	while(node != NULL) {
@@ -714,7 +723,6 @@ tellModulesActivateConfigPrePrivDrop(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_ANY);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -726,7 +734,6 @@ tellModulesActivateConfig(void)
 	cfgmodules_etry_t *node;
 	rsRetVal localRet;
 
-	BEGINfunc
 	DBGPRINTF("telling modules to activate config %p\n", runConf);
 	node = module.GetNxtCnfType(runConf, NULL, eMOD_ANY);
 	while(node != NULL) {
@@ -743,7 +750,6 @@ tellModulesActivateConfig(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_ANY);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -757,7 +763,6 @@ runInputModules(void)
 	cfgmodules_etry_t *node;
 	int bNeedsCancel;
 
-	BEGINfunc
 	node = module.GetNxtCnfType(runConf, NULL, eMOD_IN);
 	while(node != NULL) {
 		if(node->canRun) {
@@ -771,7 +776,6 @@ runInputModules(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_IN);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -798,7 +802,6 @@ startInputModules(void)
 		node = module.GetNxtCnfType(runConf, node, eMOD_IN);
 	}
 
-	ENDfunc
 	return RS_RET_OK; /* intentional: we do not care about module errors */
 }
 
@@ -824,7 +827,11 @@ activateMainQueue(void)
 		FINALIZE;
 	}
 
-	bHaveMainQueue = (ourConf->globals.mainQ.MainMsgQueType == QUEUETYPE_DIRECT) ? 0 : 1;
+	if(ourConf->globals.mainQ.MainMsgQueType == QUEUETYPE_DIRECT) {
+		PREFER_STORE_0_TO_INT(&bHaveMainQueue);
+	} else {
+		PREFER_STORE_1_TO_INT(&bHaveMainQueue);
+	}
 	DBGPRINTF("Main processing queue is initialized and running\n");
 finalize_it:
 	glblDestructMainqCnfObj();
@@ -885,6 +892,7 @@ activate(rsconf_t *cnf)
 	CHKiRet(activateMainQueue());
 	/* finally let the inputs run... */
 	runInputModules();
+	qqueueDoneLoadCnf(); /* we no longer need config-load-only data structures */
 
 	dbgprintf("configuration %p activated\n", cnf);
 
@@ -1107,7 +1115,7 @@ finalize_it:
 
 
 /* intialize the legacy config system */
-static rsRetVal 
+static rsRetVal
 initLegacyConf(void)
 {
 	DEFiRet;
@@ -1258,6 +1266,8 @@ initLegacyConf(void)
 	tplAddLine(ourConf, " StdPgSQLFmt", &pTmp);
 	pTmp = template_StdJSONFmt;
 	tplAddLine(ourConf, " StdJSONFmt", &pTmp);
+	pTmp = template_StdClickHouseFmt;
+	tplAddLine(ourConf, " StdClickHouseFmt", &pTmp);
 	pTmp = template_spoofadr;
 	tplLastStaticInit(ourConf, tplAddLine(ourConf, "RSYSLOG_omudpspoofDfltSourceTpl", &pTmp));
 
@@ -1266,7 +1276,7 @@ finalize_it:
 }
 
 
-/* validate the current configuration, generate error messages, do 
+/* validate the current configuration, generate error messages, do
  * optimizations, etc, etc,...
  */
 static rsRetVal
@@ -1309,6 +1319,7 @@ load(rsconf_t **cnf, uchar *confFile)
 {
 	int iNbrActions = 0;
 	int r;
+	rsRetVal delayed_iRet = RS_RET_OK;
 	DEFiRet;
 
 	CHKiRet(rsconfConstruct(&loadConf));
@@ -1332,7 +1343,8 @@ ourConf = loadConf; // TODO: remove, once ourConf is gone!
 	if(r == 1) {
 		LogError(0, RS_RET_CONF_PARSE_ERROR, "could not interpret master "
 			"config file '%s'.", confFile);
-		ABORT_FINALIZE(RS_RET_CONF_PARSE_ERROR);
+		/* we usually keep running with the failure, so we need to continue for now */
+		delayed_iRet = RS_RET_CONF_PARSE_ERROR;
 	} else if(r == 2) { /* file not found? */
 		LogError(errno, RS_RET_CONF_FILE_NOT_FOUND, "could not open config file '%s'",
 		        confFile);
@@ -1370,6 +1382,9 @@ ourConf = loadConf; // TODO: remove, once ourConf is gone!
 	rsconfDebugPrint(loadConf);
 
 finalize_it:
+	if(iRet == RS_RET_OK && delayed_iRet != RS_RET_OK) {
+		iRet = delayed_iRet;
+	}
 	RETiRet;
 }
 

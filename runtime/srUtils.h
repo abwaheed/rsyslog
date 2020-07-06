@@ -1,22 +1,22 @@
 /*! \file srUtils.h
  *  \brief General, small utilities that fit nowhere else.
- * 
+ *
  * \author  Rainer Gerhards <rgerhards@adiscon.com>
  * \date    2003-09-09
  *          Coding begun.
  *
- * Copyright 2003-2016 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2003-2018 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -96,26 +96,11 @@ int getSubString(uchar **ppSrc,  char *pDst, size_t DstSize, char cSep);
 rsRetVal getFileSize(uchar *pszName, off_t *pSize);
 int containsGlobWildcard(char *str);
 void seedRandomNumber(void);
+void seedRandomNumberForChild(void);
 #define MAX_RANDOM_NUMBER RAND_MAX
 long int randomNumber(void);
 long long currentTimeMills(void);
 rsRetVal ATTR_NONNULL() split_binary_parameters(uchar **const szBinary,
 	char ***const aParams, int *const iParams, es_str_t *const param_binary);
 
-/* mutex operations */
-/* some useful constants */
-#define DEFVARS_mutexProtection\
-	int bLockedOpIsLocked=0
-#define BEGIN_MTX_PROTECTED_OPERATIONS(mut, bMustLock) \
-	if(bMustLock == LOCK_MUTEX) { \
-		d_pthread_mutex_lock(mut); \
-		assert(bLockedOpIsLocked == 0); \
-		bLockedOpIsLocked = 1; \
-	}
-#define END_MTX_PROTECTED_OPERATIONS(mut) \
-	if(bLockedOpIsLocked) { \
-		d_pthread_mutex_unlock(mut); \
-		bLockedOpIsLocked = 0; \
-	}
-
-#endif
+#endif /* #ifndef __SRUTILS_H_INCLUDED__ */

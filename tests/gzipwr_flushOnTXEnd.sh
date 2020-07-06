@@ -1,32 +1,32 @@
 #!/bin/bash
 # This file is part of the rsyslog project, released  under ASL 2.0
-
-uname
-if [ `uname` = "FreeBSD" ] ; then
-   echo "This test currently does not work on FreeBSD."
-   exit 77
-fi
-
-. $srcdir/diag.sh init
-. $srcdir/diag.sh generate-conf
-. $srcdir/diag.sh add-conf '
+. ${srcdir:=.}/diag.sh init
+skip_platform "FreeBSD"  "This test currently does not work on FreeBSD"
+export NUMMESSAGES=5000 # MUST be an even number
+generate_conf
+add_conf '
 module(load="../plugins/imtcp/.libs/imtcp")
-input(type="imtcp" port="13514")
+input(type="imtcp" port="0" listenPortFileName="'$RSYSLOG_DYNNAME'.tcpflood_port")
 
-template(name="outfmt" type="string"
-	 string="%msg:F,58:2%\n")
-:msg, contains, "msgnum:" action(type="omfile" template="outfmt"
+template(name="outfmt" type="string" string="%msg:F,58:2%\n")
+:msg, contains, "msgnum:" { action(type="omfile" template="outfmt"
 				 zipLevel="6" ioBufferSize="256k"
 				 flushOnTXEnd="on"
 				 asyncWriting="on"
-			         file="rsyslog.out.log")
+			         file="'$RSYSLOG_OUT_LOG'")
+			    action(type="omfile" file="'$RSYSLOG_DYNNAME'.countlog")
+			  }
 '
-. $srcdir/diag.sh startup
-. $srcdir/diag.sh tcpflood -m2500 -P129
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh gzip-seq-check 0 2499
-. $srcdir/diag.sh tcpflood -i2500 -m2500 -P129
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown
-. $srcdir/diag.sh gzip-seq-check 0 4999
-. $srcdir/diag.sh exit
+startup
+tcpflood -m$((NUMMESSAGES / 2)) -P129
+wait_queueempty
+echo test 1
+wait_file_lines "$RSYSLOG_DYNNAME.countlog" $((NUMMESSAGES / 2 ))
+gzip_seq_check 0 $((NUMMESSAGES / 2 - 1))
+tcpflood -i$((NUMMESSAGES / 2)) -m$((NUMMESSAGES / 2)) -P129
+echo test 2
+wait_file_lines "$RSYSLOG_DYNNAME.countlog" $NUMMESSAGES
+shutdown_when_empty
+wait_shutdown
+gzip_seq_check
+exit_test

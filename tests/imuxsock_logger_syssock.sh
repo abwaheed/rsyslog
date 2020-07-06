@@ -1,34 +1,24 @@
 #!/bin/bash
+# test trailing LF handling in imuxsock
 # note: we use the system socket, but assign a different name to
 # it. This is not 100% the same thing as running as root, but it
 # is pretty close to it. -- rgerhards, 201602-19
+. ${srcdir:=.}/diag.sh init
+check_logger_has_option_d
+export NUMMESSAGES=1
+export QUEUE_EMPTY_CHECK_FUNC=wait_file_lines
+generate_conf
+add_conf '
+module(load="../plugins/imuxsock/.libs/imuxsock"
+       SysSock.name="'$RSYSLOG_DYNNAME'-testbench_socket")
 
-echo \[imuxsock_logger_syssock.sh\]: test trailing LF handling in imuxsock
-
-uname
-if [ `uname` = "FreeBSD" ] ; then
-   echo "This test currently does not work on FreeBSD."
-   exit 77
-fi
-
-if [ `uname` = "SunOS" ] ; then
-   echo "Solaris: FIX ME LOGGER"
-   exit 77
-fi
-
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup imuxsock_logger_syssock.conf
-# send a message with trailing LF
-logger -d -u testbench_socket test
-# the sleep below is needed to prevent too-early termination of rsyslogd
-./msleep 100
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown	# we need to wait until rsyslogd is finished!
-cmp rsyslog.out.log $srcdir/resultdata/imuxsock_logger.log
-if [ ! $? -eq 0 ]; then
-  echo "imuxsock_logger_syssock.sh failed"
-  echo contents of rsyslog.out.log:
-  echo \"`cat rsyslog.out.log`\"
-  exit 1
-fi;
-. $srcdir/diag.sh exit
+$template outfmt,"%msg:%\n"
+*.notice      action(type="omfile" file="'$RSYSLOG_OUT_LOG'" template="outfmt")
+'
+startup
+logger -d -u $RSYSLOG_DYNNAME-testbench_socket test
+shutdown_when_empty
+wait_shutdown
+export EXPECTED=" test"
+cmp_exact
+exit_test

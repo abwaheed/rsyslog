@@ -47,7 +47,6 @@ PARSER_NAME("rsyslog.aixforwardedfrom")
 /* internal structures
  */
 DEF_PMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(glbl)
 DEFobjCurrIf(parser)
 DEFobjCurrIf(datetime)
@@ -88,7 +87,7 @@ CODESTARTparse
 	}
 	if((unsigned) lenMsg < 24) {
 		/* too short, can not be "our" message */
-                /* minimum message, 16 character timestamp, 'From ", 1 character name, ': '*/
+		/* minimum message, 16 character timestamp, 'From ", 1 character name, ': '*/
 		ABORT_FINALIZE(RS_RET_COULD_NOT_PARSE);
 	}
 
@@ -110,6 +109,10 @@ CODESTARTparse
 	/* bump the message portion up by skipLen(23 or 5) characters to overwrite the "Message forwarded from
 " or "From " with the hostname */
 	lenMsg -=skipLen;
+	if(lenMsg < 2) {
+		dbgprintf("not a AIX message forwarded from message has nothing after header\n");
+		ABORT_FINALIZE(RS_RET_COULD_NOT_PARSE);
+	}
 	memmove(p2parse, p2parse + skipLen, lenMsg);
 	*(p2parse + lenMsg) = '\n';
 	*(p2parse + lenMsg + 1)  = '\0';
@@ -120,6 +123,11 @@ really an AIX log, but has a similar preamble */
 	while(lenMsg && *p2parse != ' ' && *p2parse != ':') {
 		--lenMsg;
 		++p2parse;
+	}
+	if (lenMsg < 1) {
+		dbgprintf("not a AIX message forwarded from message has nothing after colon "
+			"or no colon at all\n");
+		ABORT_FINALIZE(RS_RET_COULD_NOT_PARSE);
 	}
 	if (lenMsg && *p2parse != ':') {
 	DBGPRINTF("not a AIX message forwarded from mangled log but similar enough that the preamble has "
@@ -144,7 +152,6 @@ ENDparse
 BEGINmodExit
 CODESTARTmodExit
 	/* release what we no longer need */
-	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(glbl, CORE_COMPONENT);
 	objRelease(parser, CORE_COMPONENT);
 	objRelease(datetime, CORE_COMPONENT);
@@ -163,12 +170,11 @@ CODESTARTmodInit
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
 	CHKiRet(objUse(glbl, CORE_COMPONENT));
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(parser, CORE_COMPONENT));
 	CHKiRet(objUse(datetime, CORE_COMPONENT));
 
 	DBGPRINTF("aixforwardedfrom parser init called, compiled with version %s\n", VERSION);
- 	bParseHOSTNAMEandTAG = glbl.GetParseHOSTNAMEandTAG();
+	bParseHOSTNAMEandTAG = glbl.GetParseHOSTNAMEandTAG();
 	/* cache value, is set only during rsyslogd option processing */
 
 

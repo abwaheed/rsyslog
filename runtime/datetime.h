@@ -7,11 +7,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,7 +26,7 @@
 
 /* the datetime object */
 typedef struct datetime_s {
-    	char dummy;
+	char dummy;
 } datetime_t;
 
 typedef enum {
@@ -41,7 +41,7 @@ BEGINinterface(datetime) /* name must also be changed in ENDinterface macro! */
 	void (*getCurrTime)(struct syslogTime *t, time_t *ttSeconds, const int inUTC);
 	rsRetVal (*ParseTIMESTAMP3339)(struct syslogTime *pTime, uchar** ppszTS, int*);
 	rsRetVal (*ParseTIMESTAMP3164)(struct syslogTime *pTime, uchar** pszTS, int*, const int bParseTZ,
-const int bDetectYearAfterTime);
+		const int bDetectYearAfterTime);
 	int (*formatTimestampToMySQL)(struct syslogTime *ts, char* pDst);
 	int (*formatTimestampToPgSQL)(struct syslogTime *ts, char *pDst);
 	int (*formatTimestamp3339)(struct syslogTime *ts, char* pBuf);

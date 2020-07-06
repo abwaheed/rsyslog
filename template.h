@@ -8,11 +8,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,7 +22,7 @@
  * Note: there is a tiny bit of code left where I could not get any response
  * from the author if this code can be placed under ASL2.0. I have guarded this
  * with #ifdef STRICT_GPLV3. Only if that macro is defined, the code will be
- * compiled. Otherwise this feature is not present. The plan is to do a 
+ * compiled. Otherwise this feature is not present. The plan is to do a
  * different implementation in the future to get rid of this problem.
  * rgerhards, 2012-08-25
  */
@@ -60,12 +60,12 @@ struct template {
 
 enum EntryTypes { UNDEFINED = 0, CONSTANT = 1, FIELD = 2 };
 enum tplFormatTypes { tplFmtDefault = 0, tplFmtMySQLDate = 1,
-                      tplFmtRFC3164Date = 2, tplFmtRFC3339Date = 3, tplFmtPgSQLDate = 4,
-		      tplFmtSecFrac = 5, tplFmtRFC3164BuggyDate = 6, tplFmtUnixDate = 7,
-		      tplFmtWDayName = 8, tplFmtYear = 9, tplFmtMonth = 10, tplFmtDay = 11,
-		      tplFmtHour = 12, tplFmtMinute = 13, tplFmtSecond = 14,
-		      tplFmtTZOffsHour = 15, tplFmtTZOffsMin = 16, tplFmtTZOffsDirection = 17,
-		      tplFmtWDay = 18, tplFmtOrdinal = 19, tplFmtWeek = 20};
+			tplFmtRFC3164Date = 2, tplFmtRFC3339Date = 3, tplFmtPgSQLDate = 4,
+			tplFmtSecFrac = 5, tplFmtRFC3164BuggyDate = 6, tplFmtUnixDate = 7,
+			tplFmtWDayName = 8, tplFmtYear = 9, tplFmtMonth = 10, tplFmtDay = 11,
+			tplFmtHour = 12, tplFmtMinute = 13, tplFmtSecond = 14,
+			tplFmtTZOffsHour = 15, tplFmtTZOffsMin = 16, tplFmtTZOffsDirection = 17,
+			tplFmtWDay = 18, tplFmtOrdinal = 19, tplFmtWeek = 20};
 enum tplFormatCaseConvTypes { tplCaseConvNo = 0, tplCaseConvUpper = 1, tplCaseConvLower = 2 };
 enum tplRegexType { TPL_REGEX_BRE = 0, /* posix BRE */
 		    TPL_REGEX_ERE = 1  /* posix ERE */
@@ -104,7 +104,7 @@ struct templateEntry {
 									that we were searching in*/
 				TPL_REGEX_NOMATCH_USE_ZERO = 3 /* use  0 (useful for numerical values) */
 			}  nomatchAction;	/**< what to do if we do not have a match? */
-			
+
 #endif
 			unsigned has_fields; /* support for field-counting: field to extract */
 			unsigned char field_delim; /* support for field-counting: field delemiter char */
@@ -133,6 +133,15 @@ struct templateEntry {
 				unsigned bFromPosEndRelative: 1;/* is From/To-Pos relative to end of string? */
 				unsigned bFixedWidth: 1;	/* space pad to toChar if string is shorter */
 				unsigned bDateInUTC: 1;		/* should date be expressed in UTC? */
+				#define TPE_DATATYPE_STRING 0
+				#define TPE_DATATYPE_NUMBER 1
+				#define TPE_DATATYPE_BOOL 2
+				#define TPE_DATATYPE_AUTO 3 /* NOTE: bit field values exhausted! */
+				unsigned dataType: 2;
+				#define TPE_DATAEMPTY_KEEP 0
+				#define TPE_DATAEMPTY_SKIP 1
+				#define TPE_DATAEMPTY_NULL 2
+				unsigned onEmpty: 2;
 			} options;		/* options as bit fields */
 		} field;
 	} data;
@@ -148,7 +157,6 @@ ENDinterface(tpl)
 PROTOTYPEObj(tpl);
 
 
-//struct template* tplConstruct(void);
 struct template *tplAddLine(rsconf_t *conf, const char* pName, unsigned char** pRestOfConfLine);
 struct template *tplFind(rsconf_t *conf, char *pName, int iLenName);
 int tplGetEntryCount(struct template *pTpl);
@@ -163,7 +171,6 @@ int tplRequiresDateCall(struct template *pTpl);
  * BEFORE msg.h, even if your code file does not actually need it.
  * rgerhards, 2007-08-06
  */
-rsRetVal tplToArray(struct template *pTpl, smsg_t *pMsg, uchar*** ppArr, struct syslogTime *ttNow);
 rsRetVal tplToJSON(struct template *pTpl, smsg_t *pMsg, struct json_object **, struct syslogTime *ttNow);
 rsRetVal doEscape(uchar **pp, rs_size_t *pLen, unsigned short *pbMustBeFreed, int escapeMode);
 rsRetVal

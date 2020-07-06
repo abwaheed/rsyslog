@@ -53,9 +53,10 @@ static struct cnfparamdescr modpdescr[] = {
 };
 
 static struct cnfparamblk modpblk =
-{ CNFPARAMBLK_VERSION,
-  sizeof(modpdescr)/sizeof(struct cnfparamdescr),
-  modpdescr
+{
+	CNFPARAMBLK_VERSION,
+	sizeof(modpdescr)/sizeof(struct cnfparamdescr),
+	modpdescr
 };
 
 rsRetVal
@@ -128,7 +129,7 @@ dynstats_addBucketMetrics(dynstats_buckets_t *bkts, dynstats_bucket_t *b, const 
 	name_len = ustrlen(name);
 	CHKmalloc(metric_name_buff = malloc((name_len + DYNSTATS_MAX_BUCKET_NS_METRIC_LENGTH + 1) * sizeof(uchar)));
 
-	ustrncpy(metric_name_buff, name, name_len);
+	strcpy((char*)metric_name_buff, (char*)name);
 	metric_suffix = metric_name_buff + name_len;
 	*metric_suffix = DYNSTATS_METRIC_NAME_SEPARATOR;
 	metric_suffix++;
@@ -320,7 +321,7 @@ dynstats_newBucket(const uchar* name, uint8_t resettable, uint32_t maxCardinalit
 		CHKmalloc(b = calloc(1, sizeof(dynstats_bucket_t)));
 		b->resettable = resettable;
 		b->maxCardinality = maxCardinality;
-		b->unusedMetricLife = 1000 * unusedMetricLife; 
+		b->unusedMetricLife = 1000 * unusedMetricLife;
 		CHKmalloc(b->name = ustrdup(name));
 
 		pthread_rwlockattr_init(&bucket_lock_attr);
@@ -498,7 +499,7 @@ finalize_it:
 	RETiRet;
 }
 
-#if !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized" /* TODO: how can we fix these warnings? */
 #endif
@@ -579,7 +580,7 @@ finalize_it:
 	}
 	RETiRet;
 }
-#if !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 
@@ -614,7 +615,7 @@ finalize_it:
 	if (iRet != RS_RET_OK) {
 		if (iRet == RS_RET_NOENTRY) {
 			/* NOTE: this is not tested (because it requires very strong orchestration to
-			gurantee contended lock for testing) */
+			guarantee contended lock for testing) */
 			STATSCOUNTER_INC(b->ctrOpsIgnored, b->mutCtrOpsIgnored);
 		} else {
 			STATSCOUNTER_INC(b->ctrOpsOverflow, b->mutCtrOpsOverflow);

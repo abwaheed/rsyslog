@@ -1,12 +1,17 @@
 pkglib_LTLIBRARIES = omkafka.la
 
+if OMKAFKA_USE_DUMMY
+omkafka_la_SOURCES = dummy.c
+omkafka_la_LDFLAGS = -module -avoid-version
+omkafka_la_CPPFLAGS =  $(RSRT_CFLAGS) $(PTHREADS_CFLAGS) -D MODNAME=omkafka
+else
 omkafka_la_SOURCES = omkafka.c
+omkafka_la_LDFLAGS = -module -avoid-version $(LIBRDKAFKA_LIBS) -lm
 omkafka_la_CPPFLAGS =  $(RSRT_CFLAGS) $(PTHREADS_CFLAGS)
-if !ENABLE_KAFKA_STATIC
-omkafka_la_LDFLAGS = -module -avoid-version $(LIBRDKAFKA_LIBS)
 endif
+
 if ENABLE_KAFKA_STATIC
-omkafka_la_LDFLAGS = -module -avoid-version -Wl,--whole-archive -l:librdkafka.a -Wl,--no-whole-archive -lssl -lpthread -lcrypto -lsasl2 -lz -llz4 -lrt # Static Linking now $(LIBRDKAFKA_LIBS)
+omkafka_la_LDFLAGS = -module -avoid-version -Wl,--whole-archive -l:librdkafka.a -Wl,--no-whole-archive -lssl -lpthread -lcrypto -lsasl2 -lz -llz4 -lrt -lm
 endif
 omkafka_la_LIBADD = 
 

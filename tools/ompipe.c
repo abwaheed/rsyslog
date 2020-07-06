@@ -12,18 +12,18 @@
  * NOTE: read comments in module-template.h to understand how this pipe
  *       works!
  *
- * Copyright 2007-2016 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2007-2018 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -31,7 +31,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -44,6 +43,7 @@
 #include <unistd.h>
 #include <sys/file.h>
 
+#include "rsyslog.h"
 #include "syslogd.h"
 #include "syslogd-types.h"
 #include "srUtils.h"
@@ -70,6 +70,7 @@ typedef struct _instanceData {
 	short	fd;		/* pipe descriptor for (current) pipe */
 	pthread_mutex_t mutWrite; /* guard against multiple instances writing to same pipe */
 	sbool	bHadError;	/* did we already have/report an error on this pipe? */
+	sbool	bTryResumeReopen;	/* should we attempt to reopen the pipe on action resume? */
 } instanceData;
 
 typedef struct wrkrInstanceData {
@@ -95,7 +96,8 @@ static struct cnfparamblk modpblk =
 /* action (instance) parameters */
 static struct cnfparamdescr actpdescr[] = {
 	{ "pipe", eCmdHdlrString, CNFPARAM_REQUIRED },
-	{ "template", eCmdHdlrGetWord, 0 }
+	{ "template", eCmdHdlrGetWord, 0 },
+	{ "tryResumeReopen", eCmdHdlrBinary, 0 },
 };
 static struct cnfparamblk actpblk =
 	{ CNFPARAMBLK_VERSION,
@@ -123,7 +125,7 @@ getDfltTpl(void)
 
 
 BEGINinitConfVars		/* (re)set config variables to default values */
-CODESTARTinitConfVars 
+CODESTARTinitConfVars
 ENDinitConfVars
 
 
@@ -175,7 +177,7 @@ static rsRetVal writePipe(uchar **ppString, instanceData *pData)
 	int iLenWritten;
 	DEFiRet;
 
-	ASSERT(pData != NULL);
+	assert(pData != NULL);
 
 	if(pData->fd == -1) {
 		rsRetVal iRetLocal;
@@ -273,6 +275,7 @@ CODESTARTcreateInstance
 	pData->pipe = NULL;
 	pData->fd = -1;
 	pData->bHadError = 0;
+	pData->bTryResumeReopen = 0;
 	pthread_mutex_init(&pData->mutWrite, NULL);
 ENDcreateInstance
 
@@ -318,8 +321,13 @@ CODESTARTtryResume
 		tv.tv_usec = 0;
 		ready = select(pData->fd+1, NULL, &wrds, NULL, &tv);
 		DBGPRINTF("ompipe: tryResume: ready to write fd %d: %d\n", pData->fd, ready);
-		if(ready != 1)
+		if(ready != 1) {
+			if(pData->bTryResumeReopen && pData->fd != -1) {
+				close(pData->fd);
+				pData->fd = -1;
+			}
 			ABORT_FINALIZE(RS_RET_SUSPENDED);
+		}
 	}
 finalize_it:
 ENDtryResume
@@ -361,13 +369,15 @@ CODESTARTnewActInst
 			pData->pipe = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "template")) {
 			pData->tplName = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if(!strcmp(actpblk.descr[i].name, "tryResumeReopen")) {
+			pData->bTryResumeReopen = (int) pvals[i].val.d.n;
 		} else {
 			dbgprintf("ompipe: program error, non-handled "
 			  "param '%s'\n", actpblk.descr[i].name);
 		}
 	}
 
-	CHKiRet(OMSRsetEntry(*ppOMSR, 0, (uchar*)strdup((pData->tplName == NULL) ? 
+	CHKiRet(OMSRsetEntry(*ppOMSR, 0, (uchar*)strdup((pData->tplName == NULL) ?
 						"RSYSLOG_FileFormat" : (char*)pData->tplName),
 						OMSR_NO_RQD_TPL_OPTS));
 CODE_STD_FINALIZERnewActInst
@@ -381,14 +391,12 @@ CODESTARTparseSelectorAct
 	 */
 	if(*p == '|') {
 		if((iRet = createInstance(&pData)) != RS_RET_OK) {
-			ENDfunc
 			return iRet; /* this can not use RET_iRet! */
 		}
 	} else {
 		/* this is not clean, but we need it for the time being
-		 * TODO: remove when cleaning up modularization 
+		 * TODO: remove when cleaning up modularization
 		 */
-		ENDfunc
 		return RS_RET_CONFLINE_UNPROCESSED;
 	}
 
@@ -397,17 +405,19 @@ CODESTARTparseSelectorAct
 	++p;
 	CHKiRet(cflineParseFileName(p, (uchar*) pData->pipe, *ppOMSR, 0, OMSR_NO_RQD_TPL_OPTS,
 				       getDfltTpl()));
-		
+
 CODE_STD_FINALIZERparseSelectorAct
 ENDparseSelectorAct
 
 
 BEGINdoHUP
 CODESTARTdoHUP
+	pthread_mutex_lock(&pData->mutWrite);
 	if(pData->fd != -1) {
 		close(pData->fd);
 		pData->fd = -1;
 	}
+	pthread_mutex_unlock(&pData->mutWrite);
 ENDdoHUP
 
 
@@ -422,7 +432,7 @@ CODEqueryEtryPt_STD_OMOD_QUERIES
 CODEqueryEtryPt_STD_OMOD8_QUERIES
 CODEqueryEtryPt_doHUP
 CODEqueryEtryPt_STD_CONF2_QUERIES
-CODEqueryEtryPt_STD_CONF2_CNFNAME_QUERIES 
+CODEqueryEtryPt_STD_CONF2_CNFNAME_QUERIES
 CODEqueryEtryPt_STD_CONF2_setModCnf_QUERIES
 CODEqueryEtryPt_STD_CONF2_OMOD_QUERIES
 ENDqueryEtryPt

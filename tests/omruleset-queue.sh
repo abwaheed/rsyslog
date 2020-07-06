@@ -11,17 +11,35 @@ echo ===========================================================================
 echo \[omruleset-queue.sh\]: test for omruleset functionality with a ruleset queue
 
 uname
-if [ `uname` = "SunOS" ] ; then
+if [ $(uname) = "SunOS" ] ; then
    echo "This test currently does not work on all flavors of Solaris."
    exit 77
 fi
 
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup omruleset-queue.conf
-. $srcdir/diag.sh injectmsg  0 20000
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=20000
+export QUEUE_EMPTY_CHECK_FUNC=wait_file_lines
+generate_conf
+add_conf '
+$ModLoad ../plugins/omruleset/.libs/omruleset
+
+$ruleset rsinclude
+# create ruleset main queue with default parameters
+$RulesetCreateMainQueue on
+# make sure we do not terminate too early!
+$template outfmt,"%msg:F,58:2%\n"
+template(name="dynfile" type="string" string=`echo $RSYSLOG_OUT_LOG`) # trick to use relative path names!
+:msg, contains, "msgnum:" ?dynfile;outfmt
+
+$ruleset RSYSLOG_DefaultRuleset
+$ActionOmrulesetRulesetName rsinclude
+*.* :omruleset:
+'
+startup
+injectmsg
 echo doing shutdown
-. $srcdir/diag.sh shutdown-when-empty
+shutdown_when_empty
 echo wait on shutdown
-. $srcdir/diag.sh wait-shutdown 
-. $srcdir/diag.sh seq-check 0 19999
-. $srcdir/diag.sh exit
+wait_shutdown 
+seq_check
+exit_test

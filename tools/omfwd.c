@@ -11,11 +11,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,7 +23,6 @@
  * limitations under the License.
  */
 #include "config.h"
-#include "rsyslog.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -40,6 +39,7 @@
 #include <fcntl.h>
 #include <zlib.h>
 #include <pthread.h>
+#include "rsyslog.h"
 #include "syslogd.h"
 #include "conf.h"
 #include "syslogd-types.h"
@@ -65,7 +65,6 @@ MODULE_CNFNAME("omfwd")
 /* internal structures
  */
 DEF_OMOD_STATIC_DATA
-DEFobjCurrIf(errmsg)
 DEFobjCurrIf(glbl)
 DEFobjCurrIf(net)
 DEFobjCurrIf(netstrms)
@@ -81,8 +80,12 @@ typedef struct _instanceData {
 	uchar 	*tplName;	/* name of assigned template */
 	uchar *pszStrmDrvr;
 	uchar *pszStrmDrvrAuthMode;
+	uchar *pszStrmDrvrPermitExpiredCerts;
 	permittedPeers_t *pPermPeers;
 	int iStrmDrvrMode;
+	int iStrmDrvrExtendedCertCheck; /* verify also purpose OID in certificate extended field */
+	int iStrmDrvrSANPreference; /* ignore CN when any SAN set */
+	int iStrmTlsVerifyDepth; /**< Verify Depth for certificate chains */
 	char	*target;
 	char	*address;
 	char	*device;
@@ -140,7 +143,8 @@ typedef struct configSettings_s {
 	uchar *pszStrmDrvr; /* name of the stream driver to use */
 	int iStrmDrvrMode; /* mode for stream driver, driver-dependent (0 mostly means plain tcp) */
 	int bResendLastOnRecon; /* should the last message be re-sent on a successful reconnect? */
-	uchar *pszStrmDrvrAuthMode; /* authentication mode to use */
+	uchar *pszStrmDrvrAuthMode;		/* authentication mode to use */
+	uchar *pszStrmDrvrPermitExpiredCerts;	/* control how to handly expired certificates */
 	int iTCPRebindInterval;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
 	int iUDPRebindInterval;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
 	int bKeepAlive;
@@ -188,6 +192,10 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "streamdrivermode", eCmdHdlrInt, 0 },
 	{ "streamdriverauthmode", eCmdHdlrGetWord, 0 },
 	{ "streamdriverpermittedpeers", eCmdHdlrGetWord, 0 },
+	{ "streamdriver.permitexpiredcerts", eCmdHdlrGetWord, 0 },
+	{ "streamdriver.CheckExtendedKeyPurpose", eCmdHdlrBinary, 0 },
+	{ "streamdriver.PrioritizeSAN", eCmdHdlrBinary, 0 },
+	{ "streamdriver.TlsVerifyDepth", eCmdHdlrPositiveInt, 0 },
 	{ "resendlastmsgonreconnect", eCmdHdlrBinary, 0 },
 	{ "udp.sendtoall", eCmdHdlrBinary, 0 },
 	{ "udp.senddelay", eCmdHdlrInt, 0 },
@@ -213,7 +221,7 @@ static rsRetVal initTCP(wrkrInstanceData_t *pWrkrData);
 
 
 BEGINinitConfVars		/* (re)set config variables to default values */
-CODESTARTinitConfVars 
+CODESTARTinitConfVars
 	cs.pszTplName = NULL; /* name of the default template to use */
 	cs.pszStrmDrvr = NULL; /* name of the stream driver to use */
 	cs.iStrmDrvrMode = 0; /* mode for stream driver, driver-dependent (0 mostly means plain tcp) */
@@ -396,6 +404,7 @@ BEGINfreeInstance
 CODESTARTfreeInstance
 	free(pData->pszStrmDrvr);
 	free(pData->pszStrmDrvrAuthMode);
+	free(pData->pszStrmDrvrPermitExpiredCerts);
 	free(pData->port);
 	free(pData->networkNamespace);
 	free(pData->target);
@@ -746,10 +755,18 @@ static rsRetVal TCPSendInit(void *pvData)
 		CHKiRet(netstrms.CreateStrm(pWrkrData->pNS, &pWrkrData->pNetstrm));
 		CHKiRet(netstrm.ConstructFinalize(pWrkrData->pNetstrm));
 		CHKiRet(netstrm.SetDrvrMode(pWrkrData->pNetstrm, pData->iStrmDrvrMode));
+		CHKiRet(netstrm.SetDrvrCheckExtendedKeyUsage(pWrkrData->pNetstrm, pData->iStrmDrvrExtendedCertCheck));
+		CHKiRet(netstrm.SetDrvrPrioritizeSAN(pWrkrData->pNetstrm, pData->iStrmDrvrSANPreference));
+		CHKiRet(netstrm.SetDrvrTlsVerifyDepth(pWrkrData->pNetstrm, pData->iStrmTlsVerifyDepth));
 		/* now set optional params, but only if they were actually configured */
 		if(pData->pszStrmDrvrAuthMode != NULL) {
 			CHKiRet(netstrm.SetDrvrAuthMode(pWrkrData->pNetstrm, pData->pszStrmDrvrAuthMode));
 		}
+		if(pData->pszStrmDrvrPermitExpiredCerts != NULL) {
+			CHKiRet(netstrm.SetDrvrPermitExpiredCerts(pWrkrData->pNetstrm,
+				pData->pszStrmDrvrPermitExpiredCerts));
+		}
+
 		if(pData->pPermPeers != NULL) {
 			CHKiRet(netstrm.SetDrvrPermPeers(pWrkrData->pNetstrm, pData->pPermPeers));
 		}
@@ -989,7 +1006,7 @@ processMsg(wrkrInstanceData_t *__restrict__ const pWrkrData,
 		uLongf destLen = iMaxLine + iMaxLine/100 +12; /* recommended value from zlib doc */
 		uLong srcLen = l;
 		int ret;
-		CHKmalloc(out = (Bytef*) MALLOC(destLen));
+		CHKmalloc(out = (Bytef*) malloc(destLen));
 		out[0] = 'z';
 		out[1] = '\0';
 		ret = compress2((Bytef*) out+1, &destLen, (Bytef*) psz,
@@ -1110,14 +1127,18 @@ setInstParamDefaults(instanceData *pData)
 	pData->tcp_framingDelimiter = '\n';
 	pData->pszStrmDrvr = NULL;
 	pData->pszStrmDrvrAuthMode = NULL;
+	pData->pszStrmDrvrPermitExpiredCerts = NULL;
 	pData->iStrmDrvrMode = 0;
+	pData->iStrmDrvrExtendedCertCheck = 0;
+	pData->iStrmDrvrSANPreference = 0;
+	pData->iStrmTlsVerifyDepth = 0;
 	pData->iRebindInterval = 0;
 	pData->bKeepAlive = 0;
 	pData->iKeepAliveProbes = 0;
 	pData->iKeepAliveIntvl = 0;
 	pData->iKeepAliveTime = 0;
 	pData->gnutlsPriorityString = NULL;
-	pData->bResendLastOnRecon = 0; 
+	pData->bResendLastOnRecon = 0;
 	pData->bSendToAll = -1;  /* unspecified */
 	pData->iUDPSendDelay = 0;
 	pData->UDPSendBuf = 0;
@@ -1140,8 +1161,6 @@ CODESTARTnewActInst
 
 	pvals = nvlstGetParams(lst, &actpblk, NULL);
 	if(pvals == NULL) {
-		LogError(0, RS_RET_MISSING_CNFPARAMS, "omfwd: either the \"file\" or "
-				"\"dynfile\" parameter must be given");
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}
 
@@ -1214,8 +1233,31 @@ CODESTARTnewActInst
 			pData->pszStrmDrvr = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "streamdrivermode")) {
 			pData->iStrmDrvrMode = pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "streamdriver.CheckExtendedKeyPurpose")) {
+			pData->iStrmDrvrExtendedCertCheck = pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "streamdriver.PrioritizeSAN")) {
+			pData->iStrmDrvrSANPreference = pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "streamdriver.TlsVerifyDepth")) {
+			if (pvals[i].val.d.n >= 2) {
+				pData->iStrmTlsVerifyDepth = pvals[i].val.d.n;
+			} else {
+				parser_errmsg("streamdriver.TlsVerifyDepth must be 2 or higher but is %d",
+									(int) pvals[i].val.d.n);
+			}
 		} else if(!strcmp(actpblk.descr[i].name, "streamdriverauthmode")) {
 			pData->pszStrmDrvrAuthMode = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if(!strcmp(actpblk.descr[i].name, "streamdriver.permitexpiredcerts")) {
+			uchar *val = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+			if(   es_strcasebufcmp(pvals[i].val.d.estr, (uchar*)"off", 3)
+			   && es_strcasebufcmp(pvals[i].val.d.estr, (uchar*)"on", 2)
+			   && es_strcasebufcmp(pvals[i].val.d.estr, (uchar*)"warn", 4)
+			  ) {
+				parser_errmsg("streamdriver.permitExpiredCerts must be 'warn', 'off' or 'on' "
+					"but is '%s' - ignoring parameter, using 'off' instead.", val);
+				free(val);
+			} else {
+				pData->pszStrmDrvrPermitExpiredCerts = val;
+			}
 		} else if(!strcmp(actpblk.descr[i].name, "streamdriverpermittedpeers")) {
 			uchar *start, *str;
 			uchar *p;
@@ -1331,7 +1373,7 @@ BEGINparseSelectorAct
 	uchar *q;
 	int i;
 	rsRetVal localRet;
-        struct addrinfo;
+	struct addrinfo;
 	TCPFRAMINGMODE tcp_framing = TCP_FRAMING_OCTET_STUFFING;
 CODESTARTparseSelectorAct
 CODE_STD_STRING_REQUESTparseSelectorAct(1)
@@ -1360,7 +1402,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 	 * The first option defined is "z[0..9]" where the digit indicates
 	 * the compression level. If it is not given, 9 (best compression) is
 	 * assumed. An example action statement might be:
-	 * @@(z5,o)127.0.0.1:1400  
+	 * @@(z5,o)127.0.0.1:1400
 	 * Which means send via TCP with medium (5) compresion (z) to the local
 	 * host on port 1400. The '0' option means that octet-couting (as in
 	 * IETF I-D syslog-transport-tls) is to be used for framing (this option
@@ -1439,7 +1481,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 		tmp = ++p;
 		for(i=0 ; *p && isdigit((int) *p) ; ++p, ++i)
 			/* SKIP AND COUNT */;
-		pData->port = MALLOC(i + 1);
+		pData->port = malloc(i + 1);
 		if(pData->port == NULL) {
 			LogError(0, NO_ERRCODE, "Could not get memory to store syslog forwarding port, "
 				 "using default port, results may not be what you intend");
@@ -1453,7 +1495,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 	if(pData->port == NULL) {
 		CHKmalloc(pData->port = strdup("514"));
 	}
-	
+
 	/* now skip to template */
 	while(*p && *p != ';'  && *p != '#' && !isspace((int) *p))
 		++p; /*JUST SKIP*/
@@ -1509,7 +1551,6 @@ freeConfigVars(void)
 BEGINmodExit
 CODESTARTmodExit
 	/* release what we no longer need */
-	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(glbl, CORE_COMPONENT);
 	objRelease(net, LM_NET_FILENAME);
 	objRelease(netstrm, LM_NETSTRMS_FILENAME);
@@ -1556,7 +1597,6 @@ INITLegCnfVars
 	*ipIFVersProvided = CURR_MOD_IF_VERSION; /* we only support the current interface specification */
 CODEmodInit_QueryRegCFSLineHdlr
 	CHKiRet(objUse(glbl, CORE_COMPONENT));
-	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	CHKiRet(objUse(net,LM_NET_FILENAME));
 
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionforwarddefaulttemplate", 0, eCmdHdlrGetWord,

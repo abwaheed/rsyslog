@@ -1,6 +1,6 @@
 /* Definition of the queue support module.
  *
- * Copyright 2008 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2019 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -65,6 +65,7 @@ struct queue_s {
 	sbool	bEnqOnly;	/* does queue run in enqueue-only mode (1) or not (0)? */
 	sbool	bSaveOnShutdown;/* persists everthing on shutdown (if DA!)? 1-yes, 0-no */
 	sbool	bQueueStarted;	/* has queueStart() been called on this queue? 1-yes, 0-no */
+	sbool	takeFlowCtlFromMsg;/* override enq flow ctl by message property? */
 	int	iQueueSize;	/* Current number of elements in the queue */
 	int	iMaxQueueSize;	/* how large can the queue grow? */
 	int 	iNumWorkerThreads;/* number of worker threads to use */
@@ -90,6 +91,8 @@ struct queue_s {
 	toDeleteLst_t *toDeleteLst;/* this queue's to-delete list */
 	int	toEnq;		/* enqueue timeout */
 	int	iDeqBatchSize;	/* max number of elements that shall be dequeued at once */
+	int	iMinDeqBatchSize;/* min number of elements that shall be dequeued at once */
+	int	toMinDeqBatchSize;/* timeout for MinDeqBatchSize, in ms */
 	/* rate limiting settings (will be expanded) */
 	int	iDeqSlowdown; /* slow down dequeue by specified nbr of microseconds */
 	/* end rate limiting */
@@ -209,6 +212,7 @@ void qqueueSetDefaultsRulesetQueue(qqueue_t *pThis);
 void qqueueSetDefaultsActionQueue(qqueue_t *pThis);
 void qqueueDbgPrint(qqueue_t *pThis);
 rsRetVal qqueueShutdownWorkers(qqueue_t *pThis);
+void qqueueDoneLoadCnf(void);
 
 PROTOTYPEObjClassInit(qqueue);
 PROTOTYPEpropSetMeth(qqueue, iPersistUpdCnt, int);
@@ -232,6 +236,17 @@ PROTOTYPEpropSetMeth(qqueue, iDeqSlowdown, int);
 PROTOTYPEpropSetMeth(qqueue, sizeOnDiskMax, int64);
 PROTOTYPEpropSetMeth(qqueue, iDeqBatchSize, int);
 #define qqueueGetID(pThis) ((unsigned long) pThis)
+
+/* overridable default values (via global config) */
+extern int actq_dflt_toQShutdown;
+extern int actq_dflt_toActShutdown;
+extern int actq_dflt_toEnq;
+extern int actq_dflt_toWrkShutdown;
+
+extern int ruleset_dflt_toQShutdown;
+extern int ruleset_dflt_toActShutdown;
+extern int ruleset_dflt_toEnq;
+extern int ruleset_dflt_toWrkShutdown;
 
 #ifdef ENABLE_IMDIAG
 extern unsigned int iOverallQueueSize;

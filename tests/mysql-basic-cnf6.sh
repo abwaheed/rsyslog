@@ -1,14 +1,21 @@
 #!/bin/bash
-# This file is part of the rsyslog project, released under GPLv3
-echo ===============================================================================
-echo \[mysql-basic.sh\]: basic test for mysql-basic functionality
-. $srcdir/diag.sh init
-mysql --user=rsyslog --password=testbench < testsuites/mysql-truncate.sql
-. $srcdir/diag.sh startup mysql-basic-cnf6.conf
-. $srcdir/diag.sh injectmsg  0 5000
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown 
-# note "-s" is requried to suppress the select "field header"
-mysql -s --user=rsyslog --password=testbench < testsuites/mysql-select-msg.sql > rsyslog.out.log
-. $srcdir/diag.sh seq-check  0 4999
-. $srcdir/diag.sh exit
+# This file is part of the rsyslog project, released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=5000
+generate_conf
+add_conf '
+$ModLoad ../plugins/ommysql/.libs/ommysql
+if $msg contains "msgnum" then {
+	action(type="ommysql" server="127.0.0.1"
+	       db="'$RSYSLOG_DYNNAME'" uid="rsyslog" pwd="testbench")
+}
+'
+mysql_prep_for_test
+startup
+injectmsg
+shutdown_when_empty
+wait_shutdown 
+mysql_get_data
+seq_check
+mysql_cleanup_test
+exit_test

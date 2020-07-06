@@ -1,14 +1,30 @@
 #!/bin/bash
-# This file is part of the rsyslog project, released under GPLv3
-echo ===============================================================================
-echo \[libdbi-asyn.sh\]: asyn test for libdbi functionality
-. $srcdir/diag.sh init
-mysql --user=rsyslog --password=testbench < testsuites/mysql-truncate.sql
-. $srcdir/diag.sh startup libdbi-asyn.conf
-. $srcdir/diag.sh injectmsg  0 50000
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown 
-# note "-s" is requried to suppress the select "field header"
-mysql -s --user=rsyslog --password=testbench < testsuites/mysql-select-msg.sql > rsyslog.out.log
-. $srcdir/diag.sh seq-check  0 49999
-. $srcdir/diag.sh exit
+# This file is part of the rsyslog project, released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+export NUMMESSAGES=5000 # this test is veeeeery slow, value is a compromise
+generate_conf
+add_conf '
+$ModLoad ../plugins/omlibdbi/.libs/omlibdbi
+
+$ActionQueueType LinkedList
+$ActionQueueTimeoutEnqueue 15000
+
+$ActionLibdbiDriver mysql
+$ActionLibdbiHost 127.0.0.1
+$ActionLibdbiUserName rsyslog
+$ActionLibdbiPassword testbench
+$ActionLibdbiDBName '$RSYSLOG_DYNNAME'
+:msg, contains, "msgnum:" {
+	:omlibdbi:
+	action(type="omfile" file="'$RSYSLOG_DYNNAME'.syncfile")
+}
+'
+mysql_prep_for_test
+startup
+injectmsg
+wait_file_lines $RSYSLOG_DYNNAME.syncfile $NUMMESSAGES 2500
+shutdown_when_empty
+wait_shutdown 
+mysql_get_data
+seq_check
+exit_test

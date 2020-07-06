@@ -1,8 +1,9 @@
 #!/bin/bash
-echo \[imuxsock_ccmiddle_syssock.sh\]: test trailing LF handling in imuxsock
-
+# test trailing LF handling in imuxsock
+# part of rsyslog, released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
 uname
-if [ `uname` = "SunOS" ] ; then
+if [ $(uname) = "SunOS" ] ; then
    echo "Solaris: FIX ME"
    exit 77
 fi
@@ -13,19 +14,22 @@ if [ $no_liblogging_stdlog -ne 0 ];then
   echo "liblogging-stdlog not available - skipping test"
   exit 77
 fi
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup imuxsock_ccmiddle_syssock.conf
+
+export NUMMESSAGES=1
+export QUEUE_EMPTY_CHECK_FUNC=wait_file_lines
+generate_conf
+add_conf '
+module(load="../plugins/imuxsock/.libs/imuxsock"
+       SysSock.name="'$RSYSLOG_DYNNAME'-testbench_socket")
+
+template(name="outfmt" type="string" string="%msg:%\n")
+local1.*    action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt")
+'
+startup
 # send a message with trailing LF
-./syslog_caller -fsyslog_inject-c -m1 -C "uxsock:testbench_socket"
-# the sleep below is needed to prevent too-early termination of rsyslogd
-./msleep 100
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown	# we need to wait until rsyslogd is finished!
-cmp rsyslog.out.log $srcdir/resultdata/imuxsock_ccmiddle.log
-if [ ! $? -eq 0 ]; then
-  echo "imuxsock_ccmiddle_syssock.sh failed"
-  echo contents of rsyslog.out.log:
-  echo \"`cat rsyslog.out.log`\"
-  exit 1
-fi;
-. $srcdir/diag.sh exit
+./syslog_caller -fsyslog_inject-c -m1 -C "uxsock:$RSYSLOG_DYNNAME-testbench_socket"
+shutdown_when_empty
+wait_shutdown
+export EXPECTED=" test 1#0112"
+cmp_exact
+exit_test

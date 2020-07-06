@@ -18,12 +18,12 @@
 # wait. However, the invalid signaling did not take into account that it did not
 # signal the async writer to shut down. So the main thread went into a condition
 # wait - and thus we had a deadlock. That situation occured only under very specific
-# cirumstances. As far as the analysis goes, the following need to happen:
+# circumstances. As far as the analysis goes, the following need to happen:
 # 1. buffers on that file are being flushed
 # 2. no new data arrives
 # 3. the inactivity timeout has not yet expired
 # 4. *then* (and only then) the stream is closed or destructed
-# In that, 1 to 4 are prequisites for the deadlock which will happen in 4. However,
+# In that, 1 to 4 are prerequisites for the deadlock which will happen in 4. However,
 # for it to happen, we also need the right "timing". There is a race between the
 # main thread and the async writer thread. The deadlock will only happen under
 # the "right" circumstances, which basically means it will not happen always.
@@ -42,29 +42,44 @@
 # is still being enqueued, but at a slow rate. So if one is patient enough, the load
 # generator will be able to finish. However, rsyslogd will never process the data
 # it received because it is locked in the deadlock caused by #4 above.
-# Note that "$OMFileFlushOnTXEnd on" is not causing this behaviour. We just use it
+# Note that "$OMFileFlushOnTXEnd on" is not causing this behavior. We just use it
 # to (quite) reliably cause the failure condition. The failure described above
 # (in version 4.6.1) was also present when the setting was set to "off", but its
-# occurence was very much less probable - because the perquisites are then much
+# occurrence was very much less probable - because the perquisites are then much
 # harder to hit. without it, the test may need to run for several hours before
 # we hit all failure conditions.
 #
 # added 2010-03-17 by Rgerhards
-# This file is part of the rsyslog project, released  under GPLv3
-echo =================================================================================
-echo TEST: \[asynwr_deadlock2.sh\]: a case known to have caused a deadlock in the past
-. $srcdir/diag.sh init
+# This file is part of the rsyslog project, released under ASL 2.0
+. ${srcdir:=.}/diag.sh init
+export CI_SHUTDOWN_QUEUE_EMPTY_CHECKS=20 # this test is notoriously slow...
+generate_conf
+add_conf '
+$ModLoad ../plugins/imtcp/.libs/imtcp
+$MainMsgQueueTimeoutShutdown 10000
+$InputTCPServerListenPortFile '$RSYSLOG_DYNNAME'.tcpflood_port
+$InputTCPServerRun 0
+
+$template outfmt,"%msg:F,58:3%,%msg:F,58:4%,%msg:F,58:5%\n"
+$template dynfile,"'$RSYSLOG_DYNNAME'.%msg:F,58:2%.log" # use multiple dynafiles
+
+$OMFileFlushOnTXEnd on
+$OMFileFlushInterval 10
+$OMFileIOBufferSize 10k
+$OMFileAsyncWriting on
+$DynaFileCacheSize 4
+local0.* ?dynfile;outfmt
+'
 # uncomment for debugging support:
 #export RSYSLOG_DEBUG="debug nostdout noprintmutexaction"
 #export RSYSLOG_DEBUGLOG="log"
-. $srcdir/diag.sh startup asynwr_deadlock2.conf
+startup
 # send 20000 messages, each close to 2K (non-randomized!), so that we can fill
 # the buffers and hopefully run into the "deadlock".
-. $srcdir/diag.sh tcpflood -m20000 -d1800 -P129 -i1 -f5
-# the sleep below is needed to prevent too-early termination of the tcp listener
-sleep 1
-. $srcdir/diag.sh shutdown-when-empty # shut down rsyslogd when done processing messages
-. $srcdir/diag.sh wait-shutdown       # and wait for it to terminate
-cat rsyslog.out.*.log > rsyslog.out.log
-. $srcdir/diag.sh seq-check 1 20000 -E
-. $srcdir/diag.sh exit
+tcpflood -m20000 -d1800 -P129 -i1 -f5
+shutdown_when_empty
+wait_shutdown
+cat $RSYSLOG_DYNNAME.*.log > $RSYSLOG_OUT_LOG
+seq_check 1 20000 -E
+rm -f $RSYSLOG_DYNNAME.*.log
+exit_test

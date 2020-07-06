@@ -18,11 +18,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -60,7 +60,7 @@
 	/* functions below are not needed if we have atomics */
 #	define DEF_ATOMIC_HELPER_MUT(x)
 #	define INIT_ATOMIC_HELPER_MUT(x)
-#	define DESTROY_ATOMIC_HELPER_MUT(x) 
+#	define DESTROY_ATOMIC_HELPER_MUT(x)
 
 	/* the following operations should preferrably be done atomic, but it is
 	 * not fatal if not -- that means we can live with some missed updates. So be
@@ -68,6 +68,8 @@
 	 */
 #	define PREFER_ATOMIC_INC(data) ((void) __sync_fetch_and_add(&(data), 1))
 #	define PREFER_FETCH_32BIT(data) ((unsigned) __sync_fetch_and_and(&(data), 0xffffffff))
+#	define PREFER_STORE_0_TO_INT(data) __sync_fetch_and_and(data, 0)
+#	define PREFER_STORE_1_TO_INT(data) __sync_fetch_and_or(data, 1)
 #else
 	/* note that we gained parctical proof that theoretical problems DO occur
 	 * if we do not properly address them. See this blog post for details:
@@ -212,21 +214,23 @@
 
 #	define PREFER_ATOMIC_INC(data) ((void) ++data)
 #	define PREFER_FETCH_32BIT(data) ((unsigned) (data))
+#	define PREFER_STORE_0_TO_INT(data) (*(data) = 0)
+#	define PREFER_STORE_1_TO_INT(data) (*(data) = 1)
 
 #endif
 
-/* we need to handle 64bit atomics seperately as some platforms have 
+/* we need to handle 64bit atomics seperately as some platforms have
  * 32 bit atomics, but not 64 bit ones... -- rgerhards, 2010-12-01
  */
 #ifdef HAVE_ATOMIC_BUILTINS64
 #	define ATOMIC_INC_uint64(data, phlpmut) ((void) __sync_fetch_and_add(data, 1))
 #	define ATOMIC_ADD_uint64(data, phlpmut, value) ((void) __sync_fetch_and_add(data, value))
-#	define ATOMIC_DEC_unit64(data, phlpmut) ((void) __sync_sub_and_fetch(data, 1))
+#	define ATOMIC_DEC_uint64(data, phlpmut) ((void) __sync_sub_and_fetch(data, 1))
 #	define ATOMIC_INC_AND_FETCH_uint64(data, phlpmut) __sync_fetch_and_add(data, 1)
 
 #	define DEF_ATOMIC_HELPER_MUT64(x)
 #	define INIT_ATOMIC_HELPER_MUT64(x)
-#	define DESTROY_ATOMIC_HELPER_MUT64(x) 
+#	define DESTROY_ATOMIC_HELPER_MUT64(x)
 #else
 #	define ATOMIC_INC_uint64(data, phlpmut)  { \
 		pthread_mutex_lock(phlpmut); \

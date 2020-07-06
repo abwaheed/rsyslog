@@ -16,15 +16,28 @@
 # (default value of closeTimeout), which should be sufficient for the
 # program to write its output.
 
-. $srcdir/diag.sh init
-. $srcdir/diag.sh startup omprog-defaults.conf
-. $srcdir/diag.sh wait-startup
-. $srcdir/diag.sh injectmsg 0 10
-. $srcdir/diag.sh wait-queueempty
-. $srcdir/diag.sh shutdown-when-empty
-. $srcdir/diag.sh wait-shutdown
+. ${srcdir:=.}/diag.sh init
+generate_conf
+add_conf '
+module(load="../plugins/omprog/.libs/omprog")
 
-expected_output="Starting with parameters: param1 param2 param3
+template(name="outfmt" type="string" string="%msg%\n")
+
+:msg, contains, "msgnum:" {
+    action(
+        type="omprog"
+	    binary=`echo $srcdir/testsuites/omprog-defaults-bin.sh p1 p2 p3`
+        template="outfmt"
+        name="omprog_action"
+    )
+}
+'
+startup
+injectmsg 0 10
+shutdown_when_empty
+wait_shutdown
+
+export EXPECTED="Starting with parameters: p1 p2 p3
 Received msgnum:00000000:
 Received msgnum:00000001:
 Received msgnum:00000002:
@@ -37,11 +50,6 @@ Received msgnum:00000008:
 Received msgnum:00000009:
 Terminating normally"
 
-written_output=$(<rsyslog.out.log)
-if [[ "$expected_output" != "$written_output" ]]; then
-    echo unexpected omprog script output:
-    echo "$written_output"
-    . $srcdir/diag.sh error-exit 1
-fi
+cmp_exact $RSYSLOG_OUT_LOG
 
-. $srcdir/diag.sh exit
+exit_test
